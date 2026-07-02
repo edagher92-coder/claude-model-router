@@ -28,6 +28,6 @@ The Pro Kit adds:
 - Lifetime updates for every new Claude model
 - Email support from the builder
 
-Want the one-command installer, Claude Code hook, usage dashboard, and priority support? → **[Pro Kit — link here]**
+Want the one-command installer, Claude Code hook, usage dashboard, and priority support? → **[Pro Kit](https://edagher.gumroad.com/l/claude-model-router-pro)**
 
 MIT licensed. Built by [Elie Dagher](https://github.com/) — Snowflow NSW, Slushieco, ReGen Labs Engineering, DISPATCHIQ.
