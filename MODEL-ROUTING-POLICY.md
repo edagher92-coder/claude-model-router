@@ -99,3 +99,13 @@ Produce the exact depth the task requires. No filler. Be concise for mechanical 
 - Log every dispatch with timestamp, tier, model ID, effort, input tokens, output tokens, and status.
 - Use the Models API periodically to confirm available models and token limits for the running account.
 - Do not commit API keys, private transcripts, local paths, or session IDs into public repositories.
+
+## Related — operational deployment policy
+
+This document is the **Claude-only implementation reference** for the router package
+(`router.py` + tests: tiers `haiku`, `sonnet`, `opus`, `fable`, `mythos`). The **operational
+deployment layer** — standing auto-delegation, the `UserPromptSubmit` classifier hook, and the
+free-local-Ollama → Ollama Cloud → Claude tier ladder — is documented separately in
+`edagher92-coder/Claude-code-Agents` → `docs/model-routing-policy-v4.md` (v4.0 *Automatic Tier
+Delegation*). That layer is intentionally kept out of this package so the public router stays
+Claude-only and consistent with its registry and tests.
