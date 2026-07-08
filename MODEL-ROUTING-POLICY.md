@@ -1,6 +1,6 @@
 # Model Routing Policy v5.0 — Quality First, Zero Waste
 
-Updated: 2026-07-05
+Updated: 2026-07-08
 
 Principle: route every task to the lowest-cost Claude tier that should meet the required quality bar. Never let cost degrade quality. Never burn a premium tier on work a lower tier handles reliably. Manual model selection always wins.
 
@@ -68,6 +68,77 @@ A manually selected tier through a picker, `/model`, `tier=`, or environment ove
 3. Start at Opus for complex architecture, high-stakes analysis, customer-facing output, compliance, money-impacting work, or ambiguous quality-critical work.
 4. Escalate one tier if output is too short, incomplete, tool-use fails, or confidence is low.
 5. Escalate to Fable only for genuinely frontier tasks or after Opus fails.
+
+### The 80%-then-ROI gate (mandatory before any tier escalation)
+
+Escalating a model tier is never the first lever — raising effort within the current tier is. A tier
+is not "used up" until it has been tried at the effort level the task actually calls for. Concretely,
+before moving up a tier:
+
+1. **Exhaust the current tier's effort range first.** If the current tier is still running at `low` or
+   `medium` and the task is at all quality-sensitive, raise effort (`high` → `xhigh` → `max`) before
+   changing model. A Sonnet-5-at-`xhigh` result is frequently as good as an Opus-4.8-at-`high` result
+   at roughly a third of the per-token cost — jumping tiers first throws that away.
+2. **Then escalate only when one of these is true:**
+   - **STAKES override — skip the ROI check entirely.** Money-moving, legal/compliance, security,
+     irreversible production actions, or anything else already gated `STAKES` in the deployment layer
+     (`Claude-code-Agents` → `docs/model-routing-policy-v4.md`) escalates immediately regardless of
+     cost. Never let a cost gate block a stakes-gated task.
+   - **Verification failure at max effort.** The maxed-out attempt at the current tier fails a concrete
+     check — tests don't pass, tool use errors out, output is empty/short/off-schema (the existing
+     rule 4 guardrail), or a downstream reviewer/verifier flags it. This is evidence, not a guess —
+     never escalate preemptively "just in case" when a cheap check hasn't actually found a problem.
+   - **Marginal ROI is clearly positive.** No verification signal exists (subjective/creative/judgment
+     work), but the task's stakes are high enough that a materially better answer is worth the
+     multiplier below. "Materially better" means the escalation target has a real capability edge for
+     *this specific task type* (see Domain guidance below) — not "it's more expensive so it must be
+     better."
+3. **Know the multiplier you're paying before you pay it.** Reference pricing (see Pricing reference
+   below): Haiku → Sonnet is roughly a **3×** input/output cost jump; Sonnet → Opus is roughly **1.7×**;
+   Opus → Fable is roughly **2×**. Compounding Haiku → Fable is on the order of **10×**. These are not
+   hard caps — a stakes-gated task pays them without hesitation — but for the ROI-gated case, ask "is
+   this task's marginal value materially higher than a 3×/1.7×/2× spend increase," not "would the
+   fancier model probably do a bit better."
+
+This gate applies to model-tier escalation only. It does not gate *effort* increases within a tier —
+raising effort is the free first move, not something to ration.
+
+## Domain guidance
+
+The tier/effort tables above are task-class-based (mechanical / normal / quality-critical / frontier).
+Layer domain on top — the right tier for a task also depends on *what kind* of work it is:
+
+| Domain | Default tier | Effort | Notes |
+|---|---|---|---|
+| **Design** (UI/UX, visual, brand, layout) | Sonnet 5 | `high` | Escalate to Opus for a from-scratch design system or a client-facing brand deliverable; Sonnet at `high` handles iteration on an existing design language well. |
+| **Code** (implementation, refactors, debugging) | Sonnet 5 | `high`, `xhigh` for hard agentic/coding tasks | Escalate to Opus for large multi-file architecture, security-sensitive code, or after a maxed-effort Sonnet attempt fails review/tests (see escalation gate above). |
+| **Data & analysis** (extraction, transforms, reporting) | Haiku for pure mechanical extraction/reformatting; Sonnet for analysis requiring judgment | `high` on Sonnet | Never use Haiku when the task requires interpreting ambiguous data, only for deterministic transforms. |
+| **Debugging** | Sonnet 5 at `xhigh` | — | Debugging is agentic and benefits disproportionately from higher effort before it benefits from a higher tier — push effort first per the gate above. |
+| **Writing** (copy, docs, long-form) | Sonnet 5 | `high` | Escalate to Opus for enterprise-facing or reputationally sensitive copy (matches the existing quality-critical rule), not for routine drafting. |
+
+## Pricing reference (self-updating — do not let this go stale)
+
+Snapshot as of 2026-07-08, per 1M tokens (input / output):
+
+| Tier | Model | Input | Output |
+|---|---|---|---|
+| Haiku | `claude-haiku-4-5` | $1.00 | $5.00 |
+| Sonnet | `claude-sonnet-5` | $3.00 (**$2.00 introductory, through 2026-08-31**) | $15.00 (**$10.00 introductory**) |
+| Opus | `claude-opus-4-8` | $5.00 | $25.00 |
+| Fable | `claude-fable-5` | $10.00 | $50.00 |
+
+`MODEL_REGISTRY` in `router.py` already carries these as `input_usd_per_mtok`/`output_usd_per_mtok` —
+this table must stay in sync with that dict, not drift independently.
+
+**This table has a known expiry.** Sonnet 5's introductory pricing ($2/$10) reverts to $3/$15 on
+2026-08-31 — after that date the Haiku→Sonnet and Sonnet→Opus multipliers above both shift. Anyone
+running this policy after that date should re-verify pricing before trusting the multiplier guidance,
+via one of:
+- `client.models.retrieve("claude-sonnet-5")` / `client.models.list()` (Models API — live, authoritative)
+- The `claude-api` Claude Code skill's cached pricing table (re-synced periodically)
+
+If either source disagrees with this table, the live source wins — update this table and
+`router.py`'s registry together, don't patch just one.
 
 ## Effort rules
 
