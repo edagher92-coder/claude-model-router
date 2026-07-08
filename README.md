@@ -12,9 +12,6 @@ This repo provides a small Python router for API traffic. A fast Haiku classifie
 | `sonnet` | Claude Sonnet 5 | `claude-sonnet-5` | Default coding, drafting, data analysis, tool use, and agentic work |
 | `opus` | Claude Opus 4.8 | `claude-opus-4-8` | Complex architecture, large refactors, enterprise-quality analysis |
 | `fable` | Claude Fable 5 | `claude-fable-5` | Frontier reserve for hardest reasoning and failed Opus cases |
-| `mythos` | Claude Mythos 5 | `claude-mythos-5` | Manual-only approved defensive cybersecurity workflows |
-
-The router keeps Mythos disabled unless explicitly enabled with `CLAUDE_ROUTER_ENABLE_MYTHOS=true`.
 
 ## Quick start
 
@@ -38,13 +35,13 @@ reply = run(
 print(reply)
 ```
 
-## What changed in v4.0
+## What changed in v5.0
 
 - Added a structured `MODEL_REGISTRY` with API IDs, labels, roles, context windows, output caps, pricing fields, and availability.
-- Updated routing tiers for Haiku 4.5, Sonnet 5, Opus 4.8, Fable 5, and Mythos 5.
+- Updated routing tiers for Haiku 4.5, Sonnet 5, Opus 4.8, and Fable 5.
 - Added explicit effort control through `output_config={"effort": ...}` for supported models.
 - Added manual tier override via `run(..., tier="opus")`.
-- Added safe fallback from Fable/Mythos access errors to a lower available tier.
+- Added safe fallback from Fable access errors to a lower available tier.
 - Added environment-variable model overrides for account-specific aliases.
 - Improved CSV logging with timestamp, tier, model ID, effort, tokens, and status.
 
@@ -58,10 +55,6 @@ export CLAUDE_ROUTER_HAIKU_MODEL=claude-haiku-4-5-20251001
 export CLAUDE_ROUTER_SONNET_MODEL=claude-sonnet-5
 export CLAUDE_ROUTER_OPUS_MODEL=claude-opus-4-8
 export CLAUDE_ROUTER_FABLE_MODEL=claude-fable-5
-export CLAUDE_ROUTER_MYTHOS_MODEL=claude-mythos-5
-
-# Disabled by default. Enable only for approved access/governance.
-export CLAUDE_ROUTER_ENABLE_MYTHOS=false
 ```
 
 Tier-specific effort overrides are also supported:
@@ -81,17 +74,17 @@ export CLAUDE_ROUTER_FABLE_EFFORT=high
 
 ## Safety notes
 
-Do not commit API keys, private transcripts, local machine paths, session IDs, or customer data. Manual model overrides are respected. Mythos is not auto-routed and remains disabled unless explicitly enabled.
+Do not commit API keys, private transcripts, local machine paths, session IDs, or customer data. Manual model overrides are respected.
 
 ## Local Google Drive / Claude HQ sync
 
 For a local Windows sync folder such as:
 
 ```text
-H:\My Drive\Claude HQ\.git
+<drive>:\path\to\Claude HQ\.git
 ```
 
-pull the branch or merge the PR from GitHub on that machine, then let Google Drive for Desktop sync the working tree. The chat connector cannot directly write to a local `H:` drive path, so GitHub is the safe source of truth for the code change.
+pull the branch or merge the PR from GitHub on that machine, then let Google Drive for Desktop sync the working tree. The chat connector cannot directly write to a local drive-letter path, so GitHub is the safe source of truth for the code change.
 
 ## License
 
