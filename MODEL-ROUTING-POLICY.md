@@ -1,4 +1,4 @@
-# Model Routing Policy v4.0 — Quality First, Zero Waste
+# Model Routing Policy v5.0 — Quality First, Zero Waste
 
 Updated: 2026-07-05
 
@@ -57,15 +57,9 @@ Use for:
 
 Never default to Fable. Route here only by explicit escalation, manual override, or an approved high-stakes policy.
 
-### 5. Mythos 5 — manual-only approved access
-
-API ID: `claude-mythos-5`
-
-Use only for approved defensive cybersecurity workflows with appropriate account access and governance. Do not choose Mythos from automatic classification. The router must keep Mythos disabled unless `CLAUDE_ROUTER_ENABLE_MYTHOS=true` is explicitly set.
-
 ## Manual override
 
-A manually selected tier through a picker, `/model`, `tier=`, or environment override wins and remains locked for the current call/session. No automatic re-routing should override a manual choice except for access/availability fallback from Fable/Mythos to a lower tier.
+A manually selected tier through a picker, `/model`, `tier=`, or environment override wins and remains locked for the current call/session. No automatic re-routing should override a manual choice except for access/availability fallback from Fable to a lower tier.
 
 ## Escalation rules
 
@@ -74,7 +68,6 @@ A manually selected tier through a picker, `/model`, `tier=`, or environment ove
 3. Start at Opus for complex architecture, high-stakes analysis, customer-facing output, compliance, money-impacting work, or ambiguous quality-critical work.
 4. Escalate one tier if output is too short, incomplete, tool-use fails, or confidence is low.
 5. Escalate to Fable only for genuinely frontier tasks or after Opus fails.
-6. Do not auto-route to Mythos.
 
 ## Effort rules
 
@@ -85,7 +78,6 @@ Default:
 - Sonnet 5: `high`.
 - Opus 4.8: `high`.
 - Fable 5: `high`.
-- Mythos 5: `high`, only when manually enabled.
 
 Use lower effort only after evals prove quality holds. Use `xhigh` or `max` only when the task needs deeper reasoning and the budget is acceptable.
 
@@ -95,7 +87,17 @@ Produce the exact depth the task requires. No filler. Be concise for mechanical 
 
 ## Operational notes
 
-- Keep model IDs configurable with environment variables: `CLAUDE_ROUTER_HAIKU_MODEL`, `CLAUDE_ROUTER_SONNET_MODEL`, `CLAUDE_ROUTER_OPUS_MODEL`, `CLAUDE_ROUTER_FABLE_MODEL`, `CLAUDE_ROUTER_MYTHOS_MODEL`.
+- Keep model IDs configurable with environment variables: `CLAUDE_ROUTER_HAIKU_MODEL`, `CLAUDE_ROUTER_SONNET_MODEL`, `CLAUDE_ROUTER_OPUS_MODEL`, `CLAUDE_ROUTER_FABLE_MODEL`.
 - Log every dispatch with timestamp, tier, model ID, effort, input tokens, output tokens, and status.
 - Use the Models API periodically to confirm available models and token limits for the running account.
 - Do not commit API keys, private transcripts, local paths, or session IDs into public repositories.
+
+## Related — operational deployment policy
+
+This document is the **Claude-only implementation reference** for the router package
+(`router.py` + tests: tiers `haiku`, `sonnet`, `opus`, `fable`). The **operational
+deployment layer** — standing auto-delegation, the `UserPromptSubmit` classifier hook, and the
+free-local-Ollama → Ollama Cloud → Claude tier ladder — is documented separately in
+`edagher92-coder/Claude-code-Agents` → `docs/model-routing-policy-v4.md` (v4.0 *Automatic Tier
+Delegation*). That layer is intentionally kept out of this package so the public router stays
+Claude-only and consistent with its registry and tests.

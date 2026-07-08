@@ -1,12 +1,11 @@
-"""Claude model router v4.0 — official-model registry + dispatch + usage log.
+"""Claude model router v5.0 — official-model registry + dispatch + usage log.
 
 This router keeps the public/free kit simple while tracking the current Claude
 model lineup:
 - Claude Haiku 4.5 for mechanical/high-volume work.
 - Claude Sonnet 5 as the default workhorse.
 - Claude Opus 4.8 for complex agentic coding and enterprise-quality work.
-- Claude Fable 5 as a frontier reserve tier.
-- Claude Mythos 5 is listed for completeness but is manual/approved-access only.
+- Claude Fable 5 as the frontier reserve tier.
 
 Usage:
     from router import run
@@ -89,17 +88,6 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         output_usd_per_mtok=50.0,
         supports_effort=True,
     ),
-    "mythos": ModelInfo(
-        api_id="claude-mythos-5",
-        label="Claude Mythos 5",
-        role="Approved defensive-cybersecurity workflows only. Manual override only; disabled unless explicitly enabled.",
-        context_window="1M",
-        max_output_tokens=128_000,
-        input_usd_per_mtok=10.0,
-        output_usd_per_mtok=50.0,
-        supports_effort=True,
-        availability="limited_availability",
-    ),
 }
 
 ESCALATE = {
@@ -107,11 +95,9 @@ ESCALATE = {
     "sonnet": "opus",
     "opus": "fable",
     "fable": "fable",
-    "mythos": "mythos",
 }
 
 FALLBACK = {
-    "mythos": "fable",
     "fable": "opus",
     "opus": "sonnet",
     "sonnet": "haiku",
@@ -127,8 +113,6 @@ HAIKU  — mechanical only: reformat, rename, extract, boilerplate, row cleanup,
 SONNET — default: coding, drafting, data analysis, business tasks, multi-step agent work, tool use.
 OPUS   — quality-critical: complex architecture, deep analysis, large refactors, enterprise/customer-facing work.
 FABLE  — frontier reserve: hardest reasoning, novel system design, long-running agents, or failed Opus attempts.
-
-Do not choose MYTHOS. Mythos is manual-only for approved defensive cybersecurity workflows.
 
 Task:
 {task}
@@ -162,7 +146,7 @@ def run(
     Args:
         task: User task or prompt.
         max_tokens: Response token cap.
-        tier: Manual tier override: haiku, sonnet, opus, fable, mythos.
+        tier: Manual tier override: haiku, sonnet, opus, fable.
         effort: Optional effort override for supported models: low, medium, high, xhigh, max.
     """
     if not isinstance(task, str) or not task.strip():
@@ -172,9 +156,6 @@ def run(
     last_text = ""
 
     for _attempt in range(4):
-        if current_tier == "mythos" and not _tier_enabled("mythos"):
-            current_tier = "fable"
-
         model_id = _model_id(current_tier)
         requested_effort = _effort_for(current_tier, effort)
         request: dict[str, object] = {
@@ -189,9 +170,9 @@ def run(
         try:
             response = client.messages.create(**request)
         except anthropic.APIStatusError as exc:
-            # Fable/Mythos can be unavailable or permission-restricted on some accounts.
+            # Fable can be unavailable or permission-restricted on some accounts.
             # Fall back one tier for access/availability errors, but re-raise all other errors.
-            if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier in {"fable", "mythos"}:
+            if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier == "fable":
                 _log(current_tier, model_id, requested_effort or "", 0, 0, f"fallback_{exc.status_code}")
                 current_tier = FALLBACK[current_tier]
                 continue
@@ -239,9 +220,7 @@ def _normalise_tier(tier: Optional[str]) -> str:
 
 
 def _tier_enabled(tier: str) -> bool:
-    if tier != "mythos":
-        return True
-    return os.getenv("CLAUDE_ROUTER_ENABLE_MYTHOS", "").strip().lower() in {"1", "true", "yes", "on"}
+    return True
 
 
 def _model_id(tier: str) -> str:
