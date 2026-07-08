@@ -103,6 +103,37 @@ before moving up a tier:
 This gate applies to model-tier escalation only. It does not gate *effort* increases within a tier —
 raising effort is the free first move, not something to ration.
 
+### Grounded in published cascade-routing research (2026-07-08 review)
+
+The shape above matches the published literature on LLM cascades, with three refinements worth
+calling out explicitly:
+
+1. **Our verification signal is a placeholder, not a calibrated threshold — say so.** `router.py`'s
+   only automatic escalation trigger is "output is under 20 characters." Published cascade-routing
+   work (e.g. *Cluster, Route, Escalate*, arXiv:2606.27457; *Is Escalation Worth It? A
+   Decision-Theoretic Characterization of LLM Cascades*, arXiv:2605.06350) is explicit that real
+   escalation thresholds should be set from evaluation data via a calibrated confidence signal, not a
+   fixed heuristic — "quality has to be measured before it can be optimized." A 20-character cutoff
+   catches truncation, nothing else. Known limitation, not a claim of correctness: until `router.py`
+   logs a real quality/confidence signal per call, treat rule 4's guardrail as a crude floor, and lean
+   more on human/test verification for anything that matters.
+2. **Cascades win most cleanly on async/throughput work, not synchronous chat.** The same research
+   notes cascades shine where "the blended-cost win outweighs the tail latency on escalations" —
+   background agents, batch jobs, subagent fan-out. For latency-sensitive interactive turns, a failed
+   low-tier attempt plus a retry costs the user visible wait time on top of the token cost; when in
+   doubt on a synchronous, user-facing turn, it's reasonable to start one tier higher rather than
+   count on the cascade to converge fast.
+3. **Published cascades keep a large majority of traffic off the top tier.** One cited 2025 result
+   (matrix-factorization LLM router, MT-Bench) reached ~95% of top-tier quality while sending only
+   ~14% of queries to the strongest model. That's a useful sanity check, not a target to hit exactly:
+   if a session's tier mix in practice skews heavily toward Opus/Fable, that's a signal the
+   effort-first step of this gate isn't actually being applied, worth a spot-check rather than
+   assuming the mix is simply "this session was hard."
+
+This account's routing already implements the recommended three-layer structure (deterministic
+STAKES regex gate → cheap classifier pass → cascade-with-escalation) described in that literature —
+worth naming explicitly since it wasn't documented as a deliberate pattern before this pass.
+
 ## Domain guidance
 
 The tier/effort tables above are task-class-based (mechanical / normal / quality-critical / frontier).
