@@ -19,6 +19,10 @@ WORKER_MODELS = {
     "claude-opus-4-8": "claude-opus-4-8",
     "claude-sonnet-5": "claude-sonnet-5",
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+    # GLM 5.2 via the Ollama bridge — mid-tier bulk reasoning between Sonnet
+    # and Opus. NUMBERS RULE: never assign customer-facing price/quote/
+    # invoice/legal tasks to it (orchestrator routing responsibility).
+    "glm-5.2": "glm-5.2",
 }
 
 TASK_TYPES = {
@@ -37,6 +41,17 @@ HAIKU_CARD = (
     "You are a mechanical-transform worker in Elie Dagher's pipeline. Perform "
     "exactly the transformation requested, no judgement calls; if the task "
     "needs judgement, return status needs_input. Return a result envelope."
+)
+
+GLM_CARD = (
+    "You are the mid-tier bulk-reasoning worker (GLM 5.2 via Ollama) in Elie "
+    "Dagher's pipeline, sitting between Sonnet and Opus for heavy NON-stakes "
+    "work: long drafting, summarising, bulk analysis, first-pass reasoning. "
+    "Follow the task envelope exactly. Never invent prices, part numbers, "
+    "dates, or citations; mark anything unverified in self_check.unverified. "
+    "You are never the final authority on customer-facing numbers, legal, or "
+    "high-stakes judgement — flag those for a Claude-tier review in "
+    "self_check.concerns. Return only the structured result envelope."
 )
 
 # What a worker must return; passed to the API as a forced-choice tool schema
@@ -185,6 +200,8 @@ class RunStore:
 def load_system_card(assigned_model: str, cards_dir: Optional[str]) -> str:
     if assigned_model == "claude-haiku-4-5":
         return HAIKU_CARD
+    if assigned_model == "glm-5.2":
+        return GLM_CARD
     card_file = CARD_FILES[assigned_model]
     if cards_dir:
         path = pathlib.Path(cards_dir) / card_file

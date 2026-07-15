@@ -180,3 +180,37 @@ class TestDelegate:
             cards_dir=self._cards_dir(tmp_path),
         )
         assert "the opus fix" in captured["message"]
+
+
+class TestGlmWorker:
+    def test_glm_envelope_validates(self):
+        assert core.validate_task_envelope(make_envelope(assigned_model="glm-5.2")) == []
+
+    def test_glm_gets_inline_card_no_cards_dir_needed(self):
+        card = core.load_system_card("glm-5.2", cards_dir=None)
+        assert "mid-tier" in card and "self_check" in card
+
+    def test_glm_delegates_through_injected_caller(self, tmp_path):
+        store = core.RunStore(tmp_path / "store")
+        captured = {}
+
+        def fake_caller(model, system, message, tool):
+            captured["model"] = model
+            captured["system"] = system
+            return make_result()
+
+        core.delegate(make_envelope(assigned_model="glm-5.2"), fake_caller, store)
+        assert captured["model"] == "glm-5.2"
+        assert "NON-stakes" in captured["system"]
+
+    def test_ollama_model_detection(self):
+        from hq_orchestrator import ollama_caller
+        assert ollama_caller.is_ollama_model("glm-5.2")
+        assert not ollama_caller.is_ollama_model("claude-sonnet-5")
+
+    def test_ollama_chat_response_parsing(self):
+        from hq_orchestrator import ollama_caller
+        body = {"message": {"content": "{\"status\": \"completed\"}"}}
+        assert ollama_caller.parse_chat_response(body) == {"status": "completed"}
+        with pytest.raises(ValueError):
+            ollama_caller.parse_chat_response({"message": {"content": ""}})

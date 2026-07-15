@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import core
+from . import core, ollama_caller
 
 try:
     import anthropic
@@ -77,6 +77,14 @@ def _skills_dirs() -> list[str]:
     return [d for d in raw.split(os.pathsep) if d]
 
 
+def _caller_for(assigned_model: str) -> core.ModelCaller:
+    """Ollama-bridged tiers (GLM 5.2) go to the Ollama caller; Claude tiers
+    go to the Anthropic caller."""
+    if ollama_caller.is_ollama_model(assigned_model):
+        return ollama_caller.call
+    return _anthropic_caller
+
+
 @mcp.tool()
 def delegate_task(run_id: str, task_envelope: dict, timeout_seconds: int = 600) -> dict:
     """Dispatch a task envelope to a worker model and return its validated
@@ -88,7 +96,7 @@ def delegate_task(run_id: str, task_envelope: dict, timeout_seconds: int = 600) 
     started = time.time()
     result = core.delegate(
         task_envelope,
-        caller=_anthropic_caller,
+        caller=_caller_for(task_envelope.get("assigned_model", "")),
         store=_store,
         cards_dir=os.getenv("HQ_CARDS_DIR"),
         skills_dirs=_skills_dirs(),
