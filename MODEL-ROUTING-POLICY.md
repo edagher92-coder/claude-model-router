@@ -203,3 +203,13 @@ free-local-Ollama → Ollama Cloud → Claude tier ladder — is documented sepa
 `edagher92-coder/Claude-code-Agents` → `docs/model-routing-policy-v4.md` (v4.0 *Automatic Tier
 Delegation*). That layer is intentionally kept out of this package so the public router stays
 Claude-only and consistent with its registry and tests.
+
+## GLM 5.2 mid-tier (Ollama bridge)
+
+`glm-5.2` sits between Sonnet and Opus for heavy NON-stakes bulk reasoning,
+drafting, and summarising, dispatched through the Ollama bridge
+(`hq_orchestrator/ollama_caller.py`; env `CLAUDE_ROUTER_OLLAMA_URL` /
+`OLLAMA_API_KEY`, tag override `GLM_OLLAMA_TAG`, default `glm-5.2:cloud`).
+NUMBERS RULE: customer-facing prices, quotes, invoices, and legal content
+never route here — those stay on Claude tiers. If the bridge is unreachable,
+re-route the task to `claude-sonnet-5` rather than blocking.
