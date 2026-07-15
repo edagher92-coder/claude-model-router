@@ -107,6 +107,8 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
     ),
 }
 
+LADDER = ["haiku", "sonnet", "glm", "opus", "fable"]
+
 ESCALATE = {
     "haiku": "sonnet",
     "sonnet": "glm",   # quota-saving middle step; skipped when stakes=True
@@ -122,6 +124,10 @@ FALLBACK = {
     "sonnet": "haiku",
     "haiku": "haiku",
 }
+
+# Signals that a reply is not a complete, confident answer. Policy hard rule:
+# one failed or incomplete response at a tier => escalate immediately.
+REFUSAL_PREFIXES = ("i can't", "i cannot", "i'm unable", "i am unable", "sorry, i can't", "sorry, i cannot")
 
 SUPPORTED_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -178,19 +184,27 @@ def run(
 
     current_tier = _normalise_tier(tier) if tier else _classify(task)
     current_tier = _apply_stakes(current_tier, stakes)
+    tried: set[str] = set()
     last_text = ""
 
-    for _attempt in range(5):
+    for _attempt in range(len(LADDER)):
+        tried.add(current_tier)
         model_id = _model_id(current_tier)
         requested_effort = _effort_for(current_tier, effort)
+        stop_reason: Optional[str] = None
 
         if MODEL_REGISTRY[current_tier].engine == "ollama":
             try:
                 text, input_tokens, output_tokens = _ollama_generate(model_id, task, max_tokens)
             except Exception:
-                # Bridge down or model tag missing: back to Claude, never block.
+                # Bridge down or tag missing = infra failure, not capability:
+                # recover on Sonnet if we haven't already tried it, otherwise
+                # keep climbing. The tried-set prevents sonnet<->glm ping-pong.
                 _log(current_tier, model_id, "", 0, 0, "fallback_bridge")
-                current_tier = FALLBACK[current_tier]
+                recovery = "sonnet" if "sonnet" not in tried else _next_tier_up(current_tier, tried, stakes)
+                if recovery is None:
+                    return last_text
+                current_tier = recovery
                 continue
         else:
             request: dict[str, object] = {
@@ -213,15 +227,22 @@ def run(
             input_tokens = getattr(response.usage, "input_tokens", 0)
             output_tokens = getattr(response.usage, "output_tokens", 0)
             text = _response_text(response)
+            stop_reason = getattr(response, "stop_reason", None)
 
         last_text = text
-        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok")
 
-        # Guardrail: empty/very short responses often mean the tier was too weak or the task needs more capability.
-        if len(text.strip()) < 20 and current_tier != "fable":
-            current_tier = _apply_stakes(ESCALATE[current_tier], stakes)
+        # Policy hard rule: ONE failed or incomplete response at a tier =>
+        # escalate immediately (empty/short, token-cap truncation, refusal).
+        if _is_incomplete(text, stop_reason):
+            next_tier = _next_tier_up(current_tier, tried, stakes)
+            _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
+                 "escalated" if next_tier else "incomplete_at_top")
+            if next_tier is None:
+                return text  # top of ladder: surface what we have, honestly logged
+            current_tier = next_tier
             continue
 
+        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok")
         return text
 
     return last_text
@@ -232,6 +253,29 @@ def _apply_stakes(tier: str, stakes: bool) -> str:
     if stakes and MODEL_REGISTRY[tier].engine == "ollama":
         return "sonnet"
     return tier
+
+
+def _is_incomplete(text: str, stop_reason: Optional[str]) -> bool:
+    """True when a reply should trigger the one-strike escalation: empty or
+    very short, truncated by the token cap, or an outright refusal."""
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return True
+    if stop_reason == "max_tokens":
+        return True
+    return stripped.lower().startswith(REFUSAL_PREFIXES)
+
+
+def _next_tier_up(tier: str, tried: set[str], stakes: bool) -> Optional[str]:
+    """Next tier strictly up the ladder that hasn't been tried this run,
+    honouring the stakes guard. None when the top is exhausted."""
+    for candidate in LADDER[LADDER.index(tier) + 1:]:
+        if candidate in tried:
+            continue
+        if stakes and MODEL_REGISTRY[candidate].engine == "ollama":
+            continue
+        return candidate
+    return None
 
 
 def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
