@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 from . import core
@@ -62,7 +63,11 @@ def _anthropic_caller(model: str, system: str, message: str, submit_tool: dict) 
                     )
                     return result
             raise RuntimeError("worker response contained no submit_result tool call")
-        except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
+        except anthropic.APIConnectionError as exc:
+            last_error = exc
+        except anthropic.APIStatusError as exc:
+            if exc.status_code != 429 and exc.status_code < 500:
+                raise  # 4xx payload/auth bugs cannot succeed on retry
             last_error = exc
     raise RuntimeError(f"worker API failed after {len(RETRY_DELAYS) + 1} attempts: {last_error}")
 
