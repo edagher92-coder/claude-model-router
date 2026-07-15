@@ -89,3 +89,25 @@ pull the branch or merge the PR from GitHub on that machine, then let Google Dri
 ## License
 
 MIT licensed. Built by Elie Dagher — Snowflow NSW, Slushieco, ReGen Labs Engineering, DISPATCHIQ.
+
+## hq-orchestrator (MCP server)
+
+`hq_orchestrator/` implements the tri-agent handoff protocol defined in
+`edagher92-coder/.github` under `orchestration/handoff/` (contract v1.0):
+Fable 5 dispatches task envelopes; this server validates them, assembles the
+worker prompt (system card + skill packs + context files + dependency
+artifacts), calls Opus 4.8 / Sonnet 5 / Haiku with a forced `submit_result`
+tool so replies always parse, validates the result envelope, and persists
+everything under a runs directory.
+
+```bash
+pip install "mcp[cli]" anthropic
+export ANTHROPIC_API_KEY=sk-...
+export HQ_CARDS_DIR=/path/to/.github/orchestration/system-cards
+export HQ_SKILLS_DIRS=/path/to/.github/claude-defaults/skills:/path/to/.github/orchestration/skills/packs
+python -m hq_orchestrator.server
+```
+
+Tools: `delegate_task`, `get_task_status`, `read_artifact`, and
+`route_to_automation` (refuses without a named human approver). Core logic is
+stdlib-only and fully tested without network: `python -m pytest tests/test_hq_orchestrator.py`.
