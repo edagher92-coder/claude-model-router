@@ -10,6 +10,7 @@ This repo provides a small Python router for API traffic. A fast Haiku classifie
 |---|---|---|---|
 | `haiku` | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` | Mechanical extraction, cleanup, formatting, high-volume subagents |
 | `sonnet` | Claude Sonnet 5 | `claude-sonnet-5` | Default coding, drafting, data analysis, tool use, and agentic work |
+| `glm` | GLM 5.2 (Ollama bridge) | `glm-5.2:cloud` | Heavy NON-stakes bulk reasoning/drafting between Sonnet and Opus; `stakes=True` skips it (NUMBERS RULE) |
 | `opus` | Claude Opus 4.8 | `claude-opus-4-8` | Complex architecture, large refactors, enterprise-quality analysis |
 | `fable` | Claude Fable 5 | `claude-fable-5` | Frontier reserve for hardest reasoning and failed Opus cases |
 

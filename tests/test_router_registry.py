@@ -13,11 +13,45 @@ def test_registry_contains_current_tiers(monkeypatch):
     router = load_router(monkeypatch)
     data = router.registry()
 
-    assert set(data) == {"haiku", "sonnet", "opus", "fable"}
+    assert set(data) == {"haiku", "sonnet", "glm", "opus", "fable"}
     assert data["haiku"]["active_api_id"] == "claude-haiku-4-5-20251001"
     assert data["sonnet"]["active_api_id"] == "claude-sonnet-5"
+    assert data["glm"]["active_api_id"] == "glm-5.2:cloud"
     assert data["opus"]["active_api_id"] == "claude-opus-4-8"
     assert data["fable"]["active_api_id"] == "claude-fable-5"
+
+
+def test_glm_tier_shape(monkeypatch):
+    router = load_router(monkeypatch)
+    glm = router.registry()["glm"]
+
+    assert glm["engine"] == "ollama"
+    assert glm["availability"] == "ollama-bridge"
+    assert glm["supports_effort"] is False
+    assert router.registry()["sonnet"]["engine"] == "anthropic"
+
+
+def test_glm_sits_between_sonnet_and_opus(monkeypatch):
+    router = load_router(monkeypatch)
+
+    assert router.ESCALATE["sonnet"] == "glm"
+    assert router.ESCALATE["glm"] == "opus"
+    assert router.FALLBACK["glm"] == "sonnet"
+    assert router._normalise_tier("glm") == "glm"
+
+
+def test_stakes_guard_skips_glm(monkeypatch):
+    router = load_router(monkeypatch)
+
+    assert router._apply_stakes("glm", stakes=True) == "sonnet"
+    assert router._apply_stakes("glm", stakes=False) == "glm"
+    assert router._apply_stakes("opus", stakes=True) == "opus"
+
+
+def test_glm_effort_is_none(monkeypatch):
+    router = load_router(monkeypatch)
+
+    assert router._effort_for("glm", "max") is None
 
 
 def test_environment_model_override(monkeypatch):
