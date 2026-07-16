@@ -196,20 +196,41 @@ Produce the exact depth the task requires. No filler. Be concise for mechanical 
 
 ## Related — operational deployment policy
 
-This document is the **Claude-only implementation reference** for the router package
-(`router.py` + tests: tiers `haiku`, `sonnet`, `opus`, `fable`). The **operational
-deployment layer** — standing auto-delegation, the `UserPromptSubmit` classifier hook, and the
-free-local-Ollama → Ollama Cloud → Claude tier ladder — is documented separately in
-`edagher92-coder/Claude-code-Agents` → `docs/model-routing-policy-v4.md` (v4.0 *Automatic Tier
-Delegation*). That layer is intentionally kept out of this package so the public router stays
-Claude-only and consistent with its registry and tests.
+This document is the **implementation reference** for the router package
+(`router.py` + tests: tiers `haiku`, `sonnet`, `glm`, `opus`, `fable` — since
+v5.1 the Ollama-bridged `glm` tier is first-class in the package). The
+**operational deployment layer** — standing auto-delegation, the
+`UserPromptSubmit` classifier hook, and the HEAVY-offload conventions — is
+documented separately in `edagher92-coder/Claude-code-Agents` →
+`docs/model-routing-policy-v4.md` (v4.0 *Automatic Tier Delegation*). Both
+layers share one bridge contract: `CLAUDE_ROUTER_OLLAMA_URL` / `OLLAMA_API_KEY`
+mean the same thing everywhere.
 
-## GLM 5.2 mid-tier (Ollama bridge)
+## GLM 5.2 mid-tier (Ollama bridge) — v5.1 setup contract
 
 `glm-5.2` sits between Sonnet and Opus for heavy NON-stakes bulk reasoning,
-drafting, and summarising, dispatched through the Ollama bridge
-(`hq_orchestrator/ollama_caller.py`; env `CLAUDE_ROUTER_OLLAMA_URL` /
-`OLLAMA_API_KEY`, tag override `GLM_OLLAMA_TAG`, default `glm-5.2:cloud`).
-NUMBERS RULE: customer-facing prices, quotes, invoices, and legal content
-never route here — those stay on Claude tiers. If the bridge is unreachable,
-re-route the task to `claude-sonnet-5` rather than blocking.
+drafting, and summarising, dispatched through the Ollama bridge (both
+`router.py` and `hq_orchestrator/ollama_caller.py`).
+
+**Base resolution — a priority chain, first ready base wins:**
+1. `CLAUDE_ROUTER_OLLAMA_URL` — one URL or a comma-separated list. Point it at
+   a local daemon or a routing server on the tailnet (a daemon signed in to an
+   Ollama account serves `:cloud` tags through the same endpoint). Defaults to
+   `http://localhost:11434`.
+2. `https://ollama.com` is appended automatically when `OLLAMA_API_KEY` is set
+   (Ollama Cloud direct — the backstop). Reachability alone is not readiness:
+   ollama.com answers probes unauthenticated but rejects generation without a
+   key; `python router.py --doctor` flags exactly that.
+
+**Model tag precedence:** `CLAUDE_ROUTER_GLM_MODEL` > `GLM_OLLAMA_TAG` >
+registry default `glm-5.2:cloud`. Env is read at call time in both dispatch
+paths, so long-lived servers pick up rotation without a restart.
+
+**Degradation rules (all verified by `tests/test_router_v51_setup.py`):**
+- Bridge unreachable + Anthropic available → re-route to `claude-sonnet-5`,
+  never block.
+- Anthropic unavailable (no SDK or no key) → OFFLINE mode: non-stakes work
+  routes to the bridge, Claude tiers are skipped during escalation, and
+  `stakes=True` refuses with `RouterSetupError` (NUMBERS RULE: customer-facing
+  prices, quotes, invoices, and legal content never run on the bridge).
+- Neither engine → `RouterSetupError` pointing at `--doctor`.

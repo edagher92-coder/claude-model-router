@@ -36,6 +36,66 @@ reply = run(
 print(reply)
 ```
 
+## Setup — routing server, Ollama Cloud, offline mode (v5.1)
+
+The router runs on two engines. `python router.py --doctor` checks both and
+prints a PASS/FAIL table with the exact fix for every failing row (no tokens
+spent, no secrets printed; exit 0 when at least one engine is ready).
+
+**Anthropic engine** — `pip install anthropic` + `ANTHROPIC_API_KEY` (or
+`ANTHROPIC_AUTH_TOKEN`).
+
+**Ollama bridge** — resolved as a priority chain; the first *ready* base wins:
+
+1. `CLAUDE_ROUTER_OLLAMA_URL` — one URL **or a comma-separated list**. Point it
+   at a daemon on your machine, or at a routing server on your tailnet
+   (e.g. `http://<tailscale-host-or-100.x-ip>:11434` with *Expose Ollama to
+   the network* enabled in the Ollama app). A daemon signed in to an Ollama
+   account runs `:cloud` tags through that same endpoint — no API key needed
+   on the client. Defaults to `http://localhost:11434`.
+2. `https://ollama.com` — appended automatically when `OLLAMA_API_KEY` is set
+   (Ollama Cloud direct; the backstop when no daemon is reachable). Note:
+   ollama.com answers unauthenticated probes but rejects generation without a
+   key, and doctor flags exactly that.
+
+```bash
+# Typical multi-PC tailnet setup (client side):
+export CLAUDE_ROUTER_OLLAMA_URL="http://<routing-server>:11434,http://<second-pc>:11434"
+export OLLAMA_API_KEY=...        # optional: Ollama Cloud as the final backstop
+export GLM_OLLAMA_TAG=glm-5.2:cloud   # optional tag override (CLAUDE_ROUTER_GLM_MODEL wins over it)
+python router.py --doctor
+```
+
+On Windows, `setup-windows.ps1` does the same in one command (persists the env
+vars for the user, then runs doctor):
+
+```powershell
+.\setup-windows.ps1 -RoutingServer "http://<tailscale-ip>:11434" -OllamaApiKey "<key>"
+```
+
+Behaviour by environment (each engine degrades honestly, never silently):
+
+| Anthropic | Bridge | Mode |
+|---|---|---|
+| ready | ready | Full ladder: `haiku -> sonnet -> glm -> opus -> fable` |
+| ready | down | Claude-only: `glm` dispatch falls back to `sonnet`; escalation skips nothing else |
+| missing | ready | **OFFLINE**: everything routes to the bridge, Claude tiers are skipped in escalation, `stakes=True` refuses (NUMBERS RULE — stakes never runs on the bridge) |
+| missing | down | `RouterSetupError` pointing at `--doctor` |
+
+## What changed in v5.1
+
+- GLM 5.2 (`glm` tier) between Sonnet and Opus via the Ollama bridge, with the
+  NUMBERS RULE `stakes=True` guard and one-strike escalation.
+- Multi-base bridge chain: comma-separated `CLAUDE_ROUTER_OLLAMA_URL` + automatic
+  Ollama Cloud backstop when `OLLAMA_API_KEY` is set; first ready base wins.
+- OFFLINE (Ollama-only) mode: the router now works with no `anthropic` package
+  and no key — classification defaults to the bridge, Claude tiers are skipped,
+  stakes tasks are refused with a clean `RouterSetupError`.
+- `python router.py --doctor` setup check and `--registry`/`--tier`/`--stakes`/
+  `--effort` CLI flags.
+- Env is read at call time everywhere (a long-lived server picks up key
+  rotation and URL changes without a restart).
+
 ## What changed in v5.0
 
 - Added a structured `MODEL_REGISTRY` with API IDs, labels, roles, context windows, output caps, pricing fields, and availability.
@@ -56,6 +116,12 @@ export CLAUDE_ROUTER_HAIKU_MODEL=claude-haiku-4-5-20251001
 export CLAUDE_ROUTER_SONNET_MODEL=claude-sonnet-5
 export CLAUDE_ROUTER_OPUS_MODEL=claude-opus-4-8
 export CLAUDE_ROUTER_FABLE_MODEL=claude-fable-5
+
+# Ollama bridge (glm tier) — see the Setup section above
+export CLAUDE_ROUTER_OLLAMA_URL="http://<routing-server>:11434"  # or a comma-separated chain
+export OLLAMA_API_KEY=...                  # optional Ollama Cloud backstop
+export CLAUDE_ROUTER_GLM_MODEL=glm-5.2:cloud   # wins over GLM_OLLAMA_TAG, then the registry default
+export CLAUDE_ROUTER_OLLAMA_TIMEOUT=300    # generation timeout in seconds
 ```
 
 Tier-specific effort overrides are also supported:
@@ -68,7 +134,9 @@ export CLAUDE_ROUTER_FABLE_EFFORT=high
 
 ## Files
 
-- `router.py` — classifier, registry, dispatch, fallback, and usage log.
+- `router.py` — classifier, registry, dispatch, fallback, doctor, and usage log.
+- `hq_orchestrator/` — MCP server for the tri-agent handoff protocol (see below).
+- `tests/` — offline test suite (no network, no keys): `python -m pytest tests/`.
 - `MODEL-ROUTING-POLICY.md` — quality-first routing policy for Claude Code / cowork sessions.
 - `router-usage.csv` — generated locally at runtime; do not commit sensitive logs.
 - `LICENSE` — MIT.
