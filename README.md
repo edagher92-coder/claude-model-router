@@ -66,6 +66,13 @@ export GLM_OLLAMA_TAG=glm-5.2:cloud   # optional tag override (CLAUDE_ROUTER_GLM
 python router.py --doctor
 ```
 
+On Windows, `setup-windows.ps1` does the same in one command (persists the env
+vars for the user, then runs doctor):
+
+```powershell
+.\setup-windows.ps1 -RoutingServer "http://<tailscale-ip>:11434" -OllamaApiKey "<key>"
+```
+
 Behaviour by environment (each engine degrades honestly, never silently):
 
 | Anthropic | Bridge | Mode |
