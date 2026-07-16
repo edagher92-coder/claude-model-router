@@ -1,9 +1,13 @@
-"""Claude model router v5.0 — official-model registry + dispatch + usage log.
+"""Claude model router v5.1 — multi-engine registry + dispatch + usage log.
 
-This router keeps the public/free kit simple while tracking the current Claude
-model lineup:
+This router keeps the public/free kit simple while tracking the current
+lineup across two engines (Anthropic API + the Ollama bridge):
 - Claude Haiku 4.5 for mechanical/high-volume work.
 - Claude Sonnet 5 as the default workhorse.
+- GLM 5.2 (Ollama bridge) between Sonnet and Opus for heavy NON-stakes bulk
+  reasoning/drafting — protects Claude quota. NUMBERS RULE: never routes
+  customer-facing price/quote/invoice/legal work; pass stakes=True to keep
+  a task on Claude tiers entirely.
 - Claude Opus 4.8 for complex agentic coding and enterprise-quality work.
 - Claude Fable 5 as the frontier reserve tier.
 
@@ -45,6 +49,7 @@ class ModelInfo:
     output_usd_per_mtok: float
     supports_effort: bool
     availability: str = "generally_available"
+    engine: str = "anthropic"  # "anthropic" | "ollama"
 
 
 MODEL_REGISTRY: dict[str, ModelInfo] = {
@@ -68,6 +73,18 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         output_usd_per_mtok=15.0,
         supports_effort=True,
     ),
+    "glm": ModelInfo(
+        api_id="glm-5.2:cloud",
+        label="GLM 5.2 (Ollama bridge)",
+        role="Heavy NON-stakes bulk work between Sonnet and Opus: long drafting, summarising, research digests, bulk analysis. Never customer-facing numbers or legal.",
+        context_window="200k",
+        max_output_tokens=32_000,
+        input_usd_per_mtok=0.0,   # billed via Ollama Cloud subscription / local, not per-token API
+        output_usd_per_mtok=0.0,
+        supports_effort=False,
+        availability="ollama-bridge",
+        engine="ollama",
+    ),
     "opus": ModelInfo(
         api_id="claude-opus-4-8",
         label="Claude Opus 4.8",
@@ -90,9 +107,12 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
     ),
 }
 
+LADDER = ["haiku", "sonnet", "glm", "opus", "fable"]
+
 ESCALATE = {
     "haiku": "sonnet",
-    "sonnet": "opus",
+    "sonnet": "glm",   # quota-saving middle step; skipped when stakes=True
+    "glm": "opus",
     "opus": "fable",
     "fable": "fable",
 }
@@ -100,17 +120,23 @@ ESCALATE = {
 FALLBACK = {
     "fable": "opus",
     "opus": "sonnet",
+    "glm": "sonnet",   # bridge unreachable -> back to Claude, never block
     "sonnet": "haiku",
     "haiku": "haiku",
 }
 
+# Signals that a reply is not a complete, confident answer. Policy hard rule:
+# one failed or incomplete response at a tier => escalate immediately.
+REFUSAL_PREFIXES = ("i can't", "i cannot", "i'm unable", "i am unable", "sorry, i can't", "sorry, i cannot")
+
 SUPPORTED_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
-CLASSIFIER_PROMPT = """You are a Claude model routing classifier.
-Reply with exactly one word: HAIKU, SONNET, OPUS, or FABLE.
+CLASSIFIER_PROMPT = """You are a model routing classifier.
+Reply with exactly one word: HAIKU, SONNET, GLM, OPUS, or FABLE.
 
 HAIKU  — mechanical only: reformat, rename, extract, boilerplate, row cleanup, one-line answers.
 SONNET — default: coding, drafting, data analysis, business tasks, multi-step agent work, tool use.
+GLM    — heavy NON-stakes bulk: long summaries, research digests, big first-draft documents, bulk rewriting. NEVER anything with customer-facing prices, quotes, invoices, or legal content.
 OPUS   — quality-critical: complex architecture, deep analysis, large refactors, enterprise/customer-facing work.
 FABLE  — frontier reserve: hardest reasoning, novel system design, long-running agents, or failed Opus attempts.
 
@@ -140,58 +166,144 @@ def run(
     max_tokens: int = 4096,
     tier: Optional[str] = None,
     effort: Optional[str] = None,
+    stakes: bool = False,
 ) -> str:
     """Run a task through the model router.
 
     Args:
         task: User task or prompt.
         max_tokens: Response token cap.
-        tier: Manual tier override: haiku, sonnet, opus, fable.
+        tier: Manual tier override: haiku, sonnet, glm, opus, fable.
         effort: Optional effort override for supported models: low, medium, high, xhigh, max.
+        stakes: True keeps the task on Claude tiers only (customer-facing
+            numbers, quotes, invoices, legal — the NUMBERS RULE): the glm
+            tier is skipped in classification and escalation.
     """
     if not isinstance(task, str) or not task.strip():
         raise ValueError("task must be a non-empty string")
 
     current_tier = _normalise_tier(tier) if tier else _classify(task)
+    current_tier = _apply_stakes(current_tier, stakes)
+    tried: set[str] = set()
     last_text = ""
 
-    for _attempt in range(4):
+    for _attempt in range(len(LADDER)):
+        tried.add(current_tier)
         model_id = _model_id(current_tier)
         requested_effort = _effort_for(current_tier, effort)
-        request: dict[str, object] = {
-            "model": model_id,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": task}],
-        }
+        stop_reason: Optional[str] = None
 
-        if requested_effort:
-            request["output_config"] = {"effort": requested_effort}
-
-        try:
-            response = client.messages.create(**request)
-        except anthropic.APIStatusError as exc:
-            # Fable can be unavailable or permission-restricted on some accounts.
-            # Fall back one tier for access/availability errors, but re-raise all other errors.
-            if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier == "fable":
-                _log(current_tier, model_id, requested_effort or "", 0, 0, f"fallback_{exc.status_code}")
-                current_tier = FALLBACK[current_tier]
+        if MODEL_REGISTRY[current_tier].engine == "ollama":
+            try:
+                text, input_tokens, output_tokens = _ollama_generate(model_id, task, max_tokens)
+            except Exception:
+                # Bridge down or tag missing = infra failure, not capability:
+                # recover on Sonnet if we haven't already tried it, otherwise
+                # keep climbing. The tried-set prevents sonnet<->glm ping-pong.
+                _log(current_tier, model_id, "", 0, 0, "fallback_bridge")
+                recovery = "sonnet" if "sonnet" not in tried else _next_tier_up(current_tier, tried, stakes)
+                if recovery is None:
+                    return last_text
+                current_tier = recovery
                 continue
-            raise
+        else:
+            request: dict[str, object] = {
+                "model": model_id,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": task}],
+            }
+            if requested_effort:
+                request["output_config"] = {"effort": requested_effort}
+            try:
+                response = client.messages.create(**request)
+            except anthropic.APIStatusError as exc:
+                # Fable can be unavailable or permission-restricted on some accounts.
+                # Fall back one tier for access/availability errors, but re-raise all other errors.
+                if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier == "fable":
+                    _log(current_tier, model_id, requested_effort or "", 0, 0, f"fallback_{exc.status_code}")
+                    current_tier = FALLBACK[current_tier]
+                    continue
+                raise
+            input_tokens = getattr(response.usage, "input_tokens", 0)
+            output_tokens = getattr(response.usage, "output_tokens", 0)
+            text = _response_text(response)
+            stop_reason = getattr(response, "stop_reason", None)
 
-        input_tokens = getattr(response.usage, "input_tokens", 0)
-        output_tokens = getattr(response.usage, "output_tokens", 0)
-        text = _response_text(response)
         last_text = text
-        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok")
 
-        # Guardrail: empty/very short responses often mean the tier was too weak or the task needs more capability.
-        if len(text.strip()) < 20 and current_tier != "fable":
-            current_tier = ESCALATE[current_tier]
+        # Policy hard rule: ONE failed or incomplete response at a tier =>
+        # escalate immediately (empty/short, token-cap truncation, refusal).
+        if _is_incomplete(text, stop_reason):
+            next_tier = _next_tier_up(current_tier, tried, stakes)
+            _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
+                 "escalated" if next_tier else "incomplete_at_top")
+            if next_tier is None:
+                return text  # top of ladder: surface what we have, honestly logged
+            current_tier = next_tier
             continue
 
+        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok")
         return text
 
     return last_text
+
+
+def _apply_stakes(tier: str, stakes: bool) -> str:
+    """NUMBERS RULE enforcement: stakes work never lands on the Ollama bridge."""
+    if stakes and MODEL_REGISTRY[tier].engine == "ollama":
+        return "sonnet"
+    return tier
+
+
+def _is_incomplete(text: str, stop_reason: Optional[str]) -> bool:
+    """True when a reply should trigger the one-strike escalation: empty or
+    very short, truncated by the token cap, or an outright refusal."""
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return True
+    if stop_reason == "max_tokens":
+        return True
+    return stripped.lower().startswith(REFUSAL_PREFIXES)
+
+
+def _next_tier_up(tier: str, tried: set[str], stakes: bool) -> Optional[str]:
+    """Next tier strictly up the ladder that hasn't been tried this run,
+    honouring the stakes guard. None when the top is exhausted."""
+    for candidate in LADDER[LADDER.index(tier) + 1:]:
+        if candidate in tried:
+            continue
+        if stakes and MODEL_REGISTRY[candidate].engine == "ollama":
+            continue
+        return candidate
+    return None
+
+
+def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
+    """Dispatch to the Ollama bridge using the account's shared conventions
+    (see claude-defaults/tools/ollama_route.py and hq_orchestrator/ollama_caller)."""
+    import urllib.request
+
+    api_key = os.getenv("OLLAMA_API_KEY", "").strip()
+    default_base = "https://ollama.com" if api_key else "http://localhost:11434"
+    base = os.getenv("CLAUDE_ROUTER_OLLAMA_URL", default_base).rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+
+    import json as _json
+    payload = _json.dumps({
+        "model": model_tag,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"num_predict": max_tokens},
+    }).encode("utf-8")
+    request = urllib.request.Request(base + "/api/generate", data=payload, headers=headers)
+    with urllib.request.urlopen(request, timeout=300) as response:
+        body = _json.loads(response.read().decode("utf-8"))
+    text = (body.get("response") or "").strip()
+    if not text:
+        raise ValueError(f"no response from Ollama: {str(body.get('error', body))[:200]}")
+    return text, int(body.get("prompt_eval_count") or 0), int(body.get("eval_count") or 0)
 
 
 def _classify(task: str) -> str:
@@ -204,6 +316,7 @@ def _classify(task: str) -> str:
     return {
         "HAIKU": "haiku",
         "SONNET": "sonnet",
+        "GLM": "glm",
         "OPUS": "opus",
         "FABLE": "fable",
     }.get(word, "sonnet")
