@@ -5,10 +5,14 @@ Structured output: Ollama's /api/chat accepts a JSON Schema as `format`,
 so the worker reply parses as a result envelope just like the Anthropic
 forced-tool-choice path.
 
-Env:  CLAUDE_ROUTER_OLLAMA_URL  (default http://localhost:11434; with only
-      OLLAMA_API_KEY set, defaults to https://ollama.com — Ollama Cloud)
-      OLLAMA_API_KEY            (Cloud auth, optional)
-      GLM_OLLAMA_TAG            (override the model tag; default glm-5.2:cloud)
+Env (read at CALL time, so a long-lived server picks up changes/rotation):
+  CLAUDE_ROUTER_OLLAMA_URL  one URL or a comma-separated priority list
+                            (e.g. tailnet routing server, then a second
+                            PC's daemon). Default http://localhost:11434;
+                            with only OLLAMA_API_KEY set, https://ollama.com
+                            (Ollama Cloud) is appended to the chain.
+  OLLAMA_API_KEY            Cloud auth, optional.
+  GLM_OLLAMA_TAG            override the model tag; default glm-5.2:cloud.
 
 NUMBERS RULE (policy, enforced upstream by the orchestrator's routing):
 never dispatch customer-facing price/quote/invoice/legal tasks here.
@@ -24,24 +28,48 @@ import urllib.request
 
 RETRY_DELAYS = (2, 4, 8, 16)
 
-_API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip()
-_DEFAULT_BASE = "https://ollama.com" if _API_KEY else "http://localhost:11434"
-BASE = os.environ.get("CLAUDE_ROUTER_OLLAMA_URL", _DEFAULT_BASE).rstrip("/")
-
-# envelope tag -> Ollama model tag
-OLLAMA_TAGS = {
-    "glm-5.2": os.environ.get("GLM_OLLAMA_TAG", "glm-5.2:cloud"),
+# envelope tag -> default Ollama model tag (env override read at call time)
+_DEFAULT_TAGS = {
+    "glm-5.2": "glm-5.2:cloud",
+}
+_TAG_ENV = {
+    "glm-5.2": "GLM_OLLAMA_TAG",
 }
 
 
+def _api_key() -> str:
+    return os.environ.get("OLLAMA_API_KEY", "").strip()
+
+
+def _bases() -> list[str]:
+    """Priority-ordered base URLs — keep in step with router._ollama_bases."""
+    key = _api_key()
+    raw = os.environ.get("CLAUDE_ROUTER_OLLAMA_URL", "").strip()
+    urls = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+    if not urls:
+        urls = ["https://ollama.com" if key else "http://localhost:11434"]
+    if key and "https://ollama.com" not in urls:
+        urls.append("https://ollama.com")
+    deduped: list[str] = []
+    for url in urls:
+        if url not in deduped:
+            deduped.append(url)
+    return deduped
+
+
+def _tag(model: str) -> str:
+    return os.environ.get(_TAG_ENV[model], "").strip() or _DEFAULT_TAGS[model]
+
+
 def is_ollama_model(model: str) -> bool:
-    return model in OLLAMA_TAGS
+    return model in _DEFAULT_TAGS
 
 
 def call(model: str, system: str, message: str, submit_tool: dict, timeout: int = 600) -> dict:
     """Match the ModelCaller signature used by core.delegate."""
+    tag = _tag(model)
     payload = json.dumps({
-        "model": OLLAMA_TAGS[model],
+        "model": tag,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": message},
@@ -50,36 +78,40 @@ def call(model: str, system: str, message: str, submit_tool: dict, timeout: int 
         "format": submit_tool["input_schema"],
     }).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    if _API_KEY:
-        headers["Authorization"] = "Bearer " + _API_KEY
+    if _api_key():
+        headers["Authorization"] = "Bearer " + _api_key()
 
+    bases = _bases()
     last_error: Exception | None = None
     for delay in (0,) + RETRY_DELAYS:
         if delay:
             time.sleep(delay)
-        request = urllib.request.Request(BASE + "/api/chat", data=payload, headers=headers)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-            result = parse_chat_response(body)
-            result["usage_note"] = (
-                f"ollama:{OLLAMA_TAGS[model]} "
-                f"prompt_tokens={body.get('prompt_eval_count', '?')} "
-                f"output_tokens={body.get('eval_count', '?')}"
-            )
-            return result
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429 and exc.code < 500:
-                raise RuntimeError(
-                    f"Ollama rejected the request (HTTP {exc.code}) — check the model tag "
-                    f"'{OLLAMA_TAGS[model]}' and OLLAMA_API_KEY; not retrying"
-                ) from exc
-            last_error = exc
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            last_error = exc
+        # Walk the chain each round: routing server first, cloud as backstop.
+        for base in bases:
+            request = urllib.request.Request(base + "/api/chat", data=payload, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                result = parse_chat_response(body)
+                result["usage_note"] = (
+                    f"ollama:{tag}@{base} "
+                    f"prompt_tokens={body.get('prompt_eval_count', '?')} "
+                    f"output_tokens={body.get('eval_count', '?')}"
+                )
+                return result
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 and exc.code < 500:
+                    raise RuntimeError(
+                        f"Ollama at {base} rejected the request (HTTP {exc.code}) — check the "
+                        f"model tag '{tag}' and OLLAMA_API_KEY; not retrying"
+                    ) from exc
+                last_error = exc
+            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+                last_error = exc
     raise RuntimeError(
-        f"Ollama worker at {BASE} failed after {len(RETRY_DELAYS) + 1} attempts: {last_error}. "
-        "If the bridge is down, re-route this task to claude-sonnet-5 per the fallback rule."
+        f"Ollama worker failed after {len(RETRY_DELAYS) + 1} attempts across {bases}: "
+        f"{last_error}. If the bridge is down, re-route this task to claude-sonnet-5 "
+        "per the fallback rule."
     )
 
 
