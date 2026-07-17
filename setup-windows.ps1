@@ -5,7 +5,7 @@
 .DESCRIPTION
   Persists the router's bridge environment variables for the current user and
   runs `python router.py --doctor` to verify. Run it on each machine that will
-  dispatch through the router (NOT needed on the routing server itself — the
+  dispatch through the router (NOT needed on the routing server itself - the
   daemon there just needs "Expose Ollama to the network" enabled).
 
 .EXAMPLE
@@ -45,7 +45,7 @@ if ($GlmTag)       { Set-UserEnv "GLM_OLLAMA_TAG" $GlmTag }
 Write-Host "`nRunning the setup check:" -ForegroundColor Cyan
 python "$PSScriptRoot\router.py" --doctor
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`nDoctor reported no ready engine — follow the fix lines above." -ForegroundColor Yellow
+    Write-Host "`nDoctor reported no ready engine - follow the fix lines above." -ForegroundColor Yellow
     exit $LASTEXITCODE
 }
 
