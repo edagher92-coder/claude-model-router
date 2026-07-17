@@ -55,6 +55,23 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Optional
 
+
+# --------------------------------------------------------------------------- #
+# No-redirect policy. urllib follows 30x by default, so a redirect from an
+# allowlisted Ollama base to 169.254.169.254 (or any public host) would smuggle
+# the prompt + API key straight past the SSRF allowlist, which only validates
+# the FIRST URL. Installing a no-redirect opener process-wide makes every
+# urllib.request.urlopen call (here and in the webhook path) fail closed on any
+# redirect while preserving env-proxy support (build_opener keeps ProxyHandler).
+# --------------------------------------------------------------------------- #
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"redirect to {newurl!r} blocked (SSRF)", headers, fp)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirect()))
+
 try:  # the Anthropic engine is optional in OFFLINE (Ollama-only) mode
     import anthropic
 except ImportError:  # pragma: no cover - exercised on machines without the SDK
