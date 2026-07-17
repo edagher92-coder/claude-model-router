@@ -79,7 +79,7 @@ Behaviour by environment (each engine degrades honestly, never silently):
 |---|---|---|
 | ready | ready | Full ladder: `haiku -> sonnet -> glm -> opus -> fable` |
 | ready | down | Claude-only: `glm` dispatch falls back to `sonnet`; escalation skips nothing else |
-| missing | ready | **OFFLINE**: everything routes to the bridge, Claude tiers are skipped in escalation, `stakes=True` refuses (NUMBERS RULE — stakes never runs on the bridge) |
+| missing | ready | **OFFLINE**: non-stakes work routes to the bridge, Claude tiers are skipped in escalation, and any **stakes** task (explicit `stakes=True` **or** a customer money/legal keyword in the text) refuses rather than run on the bridge (NUMBERS RULE) |
 | missing | down | `RouterSetupError` pointing at `--doctor` |
 
 ## What changed in v5.1
