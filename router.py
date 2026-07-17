@@ -44,6 +44,8 @@ import datetime as dt
 import json
 import os
 import pathlib
+import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -258,6 +260,39 @@ def _auth_headers(api_key: str) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# Visibility — always know WHERE a reply came from
+# --------------------------------------------------------------------------- #
+def _via_label(base: Optional[str], model_tag: str) -> str:
+    """Human-readable 'where did this run' label.
+
+    Nuance worth being honest about: a ':cloud' tag served through a LOCAL
+    daemon still computes on Ollama Cloud — the daemon just proxies it. The
+    label says both the endpoint and (when inferable) where compute happened.
+    """
+    if base is None:
+        return "Anthropic API (ONLINE)"
+    cloud_tag = model_tag.endswith(":cloud")
+    if base == "https://ollama.com":
+        return "Ollama Cloud (ONLINE)"
+    host = base.split("//", 1)[-1].split(":")[0]
+    local = host in ("localhost", "127.0.0.1")
+    where = "local daemon" if local else f"routing server {host} (tailnet/LAN)"
+    if cloud_tag:
+        return f"{where} -> ':cloud' tag, compute on Ollama Cloud (ONLINE)"
+    return f"{where} (OFFLINE/on-prem)"
+
+
+def _announce(tier: str, model_id: str, via: str, seconds: float, out_tok: int, status: str) -> None:
+    """One stderr line per dispatch so the caller always SEES the routing.
+    stderr, not stdout — the answer text stays clean for piping.
+    Silence with CLAUDE_ROUTER_ANNOUNCE=0."""
+    if os.getenv("CLAUDE_ROUTER_ANNOUNCE", "1").strip().lower() in {"0", "false", "off"}:
+        return
+    print(f"[router] {tier} -> {model_id} via {via} | {seconds:.1f}s, {out_tok} tok, {status}",
+          file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
 def registry() -> dict[str, dict[str, object]]:
@@ -312,14 +347,19 @@ def run(
         requested_effort = _effort_for(current_tier, effort)
         stop_reason: Optional[str] = None
 
+        started = time.time()
+        via = "?"
         if MODEL_REGISTRY[current_tier].engine == "ollama":
             try:
-                text, input_tokens, output_tokens = _ollama_generate(model_id, task, max_tokens)
+                text, input_tokens, output_tokens, used_base = _ollama_generate(model_id, task, max_tokens)
+                via = _via_label(used_base, model_id)
             except Exception as exc:
                 # Bridge down or tag missing = infra failure, not capability:
                 # recover on Sonnet if we haven't already tried it, otherwise
                 # keep climbing. The tried-set prevents sonnet<->glm ping-pong.
-                _log(current_tier, model_id, "", 0, 0, "fallback_bridge")
+                _log(current_tier, model_id, "", 0, 0, "fallback_bridge", via="bridge unreachable")
+                _announce(current_tier, model_id, "Ollama bridge UNREACHABLE — falling back",
+                          time.time() - started, 0, "fallback")
                 recovery = (
                     "sonnet"
                     if claude_ok and "sonnet" not in tried
@@ -348,7 +388,8 @@ def run(
                 # Fable can be unavailable or permission-restricted on some accounts.
                 # Fall back one tier for access/availability errors, but re-raise all other errors.
                 if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier == "fable":
-                    _log(current_tier, model_id, requested_effort or "", 0, 0, f"fallback_{exc.status_code}")
+                    _log(current_tier, model_id, requested_effort or "", 0, 0,
+                         f"fallback_{exc.status_code}", via="Anthropic API")
                     current_tier = FALLBACK[current_tier]
                     continue
                 raise
@@ -356,21 +397,25 @@ def run(
             output_tokens = getattr(response.usage, "output_tokens", 0)
             text = _response_text(response)
             stop_reason = getattr(response, "stop_reason", None)
+            via = _via_label(None, model_id)
 
         last_text = text
 
         # Policy hard rule: ONE failed or incomplete response at a tier =>
         # escalate immediately (empty/short, token-cap truncation, refusal).
         if _is_incomplete(text, stop_reason):
+            status = "escalated" if _next_tier_up(current_tier, tried, stakes, claude_ok) else "incomplete_at_top"
             next_tier = _next_tier_up(current_tier, tried, stakes, claude_ok)
             _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
-                 "escalated" if next_tier else "incomplete_at_top")
+                 status, via=via)
+            _announce(current_tier, model_id, via, time.time() - started, output_tokens, status)
             if next_tier is None:
                 return text  # top of ladder: surface what we have, honestly logged
             current_tier = next_tier
             continue
 
-        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok")
+        _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok", via=via)
+        _announce(current_tier, model_id, via, time.time() - started, output_tokens, "ok")
         return text
 
     return last_text
@@ -563,9 +608,11 @@ def _next_tier_up(tier: str, tried: set[str], stakes: bool, claude_ok: bool = Tr
     return None
 
 
-def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
+def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int, str]:
     """Dispatch to the first reachable base in the Ollama chain (routing
-    server / local daemon first, then Ollama Cloud — see _ollama_bases)."""
+    server / local daemon first, then Ollama Cloud — see _ollama_bases).
+    Returns (text, input_tokens, output_tokens, base_used) so callers can
+    surface WHERE the reply came from."""
     bases = _ollama_bases()
     errors: list[str] = []
     for base, api_key in bases:
@@ -573,7 +620,8 @@ def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str,
             errors.append(f"{base}: unreachable")
             continue
         try:
-            return _generate_at(base, api_key, model_tag, prompt, max_tokens)
+            text, in_tok, out_tok = _generate_at(base, api_key, model_tag, prompt, max_tokens)
+            return text, in_tok, out_tok, base
         except Exception as exc:  # noqa: BLE001 - every base gets its shot
             errors.append(f"{base}: {exc}")
     raise RuntimeError("Ollama bridge failed — " + "; ".join(errors))
@@ -724,13 +772,15 @@ def _response_text(response: object) -> str:
     return "\n".join(texts).strip()
 
 
-def _log(tier: str, model_id: str, effort: str, in_tok: int, out_tok: int, status: str) -> None:
+def _log(tier: str, model_id: str, effort: str, in_tok: int, out_tok: int, status: str,
+         via: str = "") -> None:
     path = _log_path()
     is_new = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         if is_new:
-            writer.writerow(["timestamp_utc", "tier", "model_id", "effort", "input_tokens", "output_tokens", "status"])
+            writer.writerow(["timestamp_utc", "tier", "model_id", "effort",
+                             "input_tokens", "output_tokens", "status", "via"])
         writer.writerow([
             dt.datetime.now(dt.timezone.utc).isoformat(),
             tier,
@@ -739,7 +789,18 @@ def _log(tier: str, model_id: str, effort: str, in_tok: int, out_tok: int, statu
             in_tok,
             out_tok,
             status,
+            via,
         ])
+
+
+def last_dispatches(count: int = 10) -> list[dict]:
+    """The most recent usage-log rows, newest last — 'what ran where'."""
+    path = _log_path()
+    if not path.exists():
+        return []
+    with open(path, newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    return rows[-count:]
 
 
 def _print_doctor_report(report: dict) -> None:
@@ -768,8 +829,19 @@ if __name__ == "__main__":
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--doctor", action="store_true", help="run the setup check and exit")
     parser.add_argument("--registry", action="store_true", help="print the active registry as JSON")
+    parser.add_argument("--last", type=int, nargs="?", const=10, metavar="N",
+                        help="show the last N dispatches (what ran WHERE) and exit")
     args = parser.parse_args()
 
+    if args.last is not None:
+        rows = last_dispatches(args.last)
+        if not rows:
+            print("no dispatches logged yet")
+        for row in rows:
+            ts = row.get("timestamp_utc", "")[:19]
+            print(f"{ts}  {row.get('tier', ''):7s} {row.get('model_id', ''):26s} "
+                  f"{row.get('status', ''):16s} via {row.get('via') or '(pre-via log row)'}")
+        sys.exit(0)
     if args.doctor:
         report = doctor()
         _print_doctor_report(report)

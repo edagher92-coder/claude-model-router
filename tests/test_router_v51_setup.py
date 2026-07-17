@@ -422,3 +422,43 @@ def test_allocation_none_without_report_or_qualifier(monkeypatch, tmp_path):
     monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
     assert router.bench_allocation() is None
     assert router._model_id("glm") == "glm-5.2:cloud"
+
+
+# --------------------------------------------------------------------------- #
+# Visibility — announce lines, via labels, --last (added 2026-07-17)
+# --------------------------------------------------------------------------- #
+def test_via_labels(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    assert "Anthropic API (ONLINE)" == router._via_label(None, "claude-sonnet-5")
+    assert "Ollama Cloud (ONLINE)" == router._via_label("https://ollama.com", "glm-5.2")
+    assert "local daemon (OFFLINE/on-prem)" == router._via_label("http://localhost:11434", "llama3.2:3b")
+    lbl = router._via_label("http://100.122.28.89:11434", "glm-5.2:cloud")
+    assert "routing server 100.122.28.89" in lbl and "compute on Ollama Cloud (ONLINE)" in lbl
+
+
+def test_dispatch_announces_where_it_ran(monkeypatch, tmp_path, capsys):
+    router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
+    net = FakeOllamaNet({"http://alive:11434": LONG})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+
+    router.run("bulk digest", tier="glm")
+    err = capsys.readouterr().err
+    assert "[router] glm -> glm-5.2:cloud via" in err
+    # honest nuance: a :cloud tag through a private host still computes online
+    assert "compute on Ollama Cloud (ONLINE)" in err
+
+    # Silenceable for library use.
+    monkeypatch.setenv("CLAUDE_ROUTER_ANNOUNCE", "0")
+    router.run("bulk digest again", tier="glm")
+    assert "[router]" not in capsys.readouterr().err
+
+
+def test_usage_log_records_via_and_last_dispatches(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
+    net = FakeOllamaNet({"http://alive:11434": LONG})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+
+    router.run("bulk digest", tier="glm")
+    rows = router.last_dispatches(5)
+    assert rows and rows[-1]["status"] == "ok"
+    assert "compute on Ollama Cloud (ONLINE)" in rows[-1]["via"]
