@@ -137,6 +137,7 @@ def test_generate_uses_first_reachable_base(monkeypatch, tmp_path):
     )
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     text = router.run("summarise this pile", tier="glm")
     assert text == LONG
@@ -155,6 +156,7 @@ def test_generate_falls_back_to_cloud(monkeypatch, tmp_path):
                          ollama_url="http://dead:11434", ollama_key="ok-123")
     net = FakeOllamaNet({"https://ollama.com": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     assert router.run("bulk digest", tier="glm") == LONG
     generate_calls = [u for u, _, _ in net.requests if u.endswith("/api/generate")]
@@ -168,6 +170,7 @@ def test_offline_run_lands_on_bridge_without_classifier(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     # No tier given: classification must not touch Anthropic in offline mode.
     assert router.run("draft a long research digest") == LONG
@@ -178,6 +181,7 @@ def test_offline_claude_tier_reroutes_to_bridge(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     assert router.run("summarise", tier="opus") == LONG  # rerouted, not crashed
 
@@ -196,6 +200,7 @@ def test_offline_escalation_never_climbs_into_claude(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": "too short"})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     # Incomplete at glm, nothing above is available offline -> honest return.
     assert router.run("hard task", tier="glm") == "too short"
@@ -206,6 +211,7 @@ def test_offline_bridge_down_raises_setup_error(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://dead:11434")
     net = FakeOllamaNet({})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     try:
         router.run("anything", tier="glm")
@@ -219,6 +225,7 @@ def test_offline_no_bridge_configured_raises(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path)  # no URL, no keys
     net = FakeOllamaNet({})  # localhost probe fails too
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     try:
         router.run("anything", tier="sonnet")
@@ -235,6 +242,7 @@ def test_online_bridge_failure_still_recovers_on_sonnet(monkeypatch, tmp_path):
                          ollama_url="http://dead:11434")
     net = FakeOllamaNet({})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     class FakeResponse:
         content = [type("B", (), {"text": LONG})()]
@@ -261,6 +269,7 @@ def test_doctor_full_ladder(monkeypatch, tmp_path):
                          ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     report = router.doctor()
     assert report["ok"] and report["claude_ready"] and report["bridge_ready"]
@@ -274,6 +283,7 @@ def test_doctor_offline_mode(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     report = router.doctor()
     assert report["ok"] and not report["claude_ready"] and report["bridge_ready"]
@@ -286,6 +296,7 @@ def test_doctor_flags_keyless_ollama_com(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="https://ollama.com")
     net = FakeOllamaNet({"https://ollama.com": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     report = router.doctor()
     assert not report["bridge_ready"] and not report["ok"]
@@ -298,6 +309,7 @@ def test_doctor_unusable_gives_fixes_and_fails(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path)
     net = FakeOllamaNet({})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     report = router.doctor()
     assert not report["ok"] and "unusable" in report["mode"]
@@ -440,6 +452,7 @@ def test_dispatch_announces_where_it_ran(monkeypatch, tmp_path, capsys):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     router.run("bulk digest", tier="glm")
     err = capsys.readouterr().err
@@ -457,6 +470,7 @@ def test_usage_log_records_via_and_last_dispatches(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
 
     router.run("bulk digest", tier="glm")
     rows = router.last_dispatches(5)
@@ -479,6 +493,7 @@ def test_dispatch_writes_routing_status(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="https://ollama.com", ollama_key="k")
     net = FakeOllamaNet({"https://ollama.com": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
     status_path = tmp_path / ".routing-status.json"
     monkeypatch.setattr(router, "ROUTING_STATUS_FILE", status_path)
 
@@ -541,6 +556,7 @@ def test_stakes_keyword_offline_refuses(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")  # no claude
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
     try:
         router.run("send the customer their $450 tax invoice", tier="glm")
     except router.RouterSetupError as exc:
@@ -553,6 +569,7 @@ def test_lenient_review_task_runs_on_bridge_offline(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
     net = FakeOllamaNet({"http://alive:11434": LONG})
     monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
     # A model valuation / code review is NOT stakes — strongest bridge model runs it.
     assert router.run("run a top-to-bottom valuation and review of the router") == LONG
 
@@ -589,3 +606,93 @@ def test_ssrf_blocked_base_is_dropped_from_chain(monkeypatch, tmp_path, capsys):
     assert "http://169.254.169.254" not in bases
     assert "http://100.122.28.89:11434" in bases
     assert "BLOCKED" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Kimi 3rd-pass adjudicated fixes (2026-07-17)
+# --------------------------------------------------------------------------- #
+def test_dns_resolution_guard_blocks_rebind(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    # a single-label / private-looking name that actually resolves PUBLIC
+    monkeypatch.setattr(router.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("8.8.8.8", 0))])
+    assert router._host_resolves_private("sneaky") is False
+    import pytest
+    with pytest.raises(RuntimeError, match="SSRF guard"):
+        router._dispatch_ssrf_ok("http://sneaky:11434")
+    # resolves to a private IP -> allowed
+    monkeypatch.setattr(router.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("10.1.2.3", 0))])
+    assert router._host_resolves_private("gpu-box") is True
+    router._dispatch_ssrf_ok("http://gpu-box:11434")   # no raise
+    # metadata IP among results -> rejected
+    monkeypatch.setattr(router.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("169.254.169.254", 0))])
+    assert router._host_resolves_private("evil") is False
+    # ollama.com is an intentional public target -> dispatch guard skips it
+    router._dispatch_ssrf_ok("https://ollama.com")
+
+
+def test_allowlist_entry_with_port_matches(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "my-gpu.example.com:11434")
+    assert router.is_allowed_base("http://my-gpu.example.com:11434")[0]
+
+
+def test_done_reason_length_escalates(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k", ollama_url="http://alive:11434")
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
+
+    class Net:
+        def __call__(self, request, timeout=None):
+            url = request.full_url
+            if url.endswith("/api/version"):
+                return _resp({"version": "1"})
+            if url.endswith("/api/generate"):
+                # long text BUT truncated by the token cap
+                return _resp({"response": "x" * 80, "done_reason": "length",
+                              "prompt_eval_count": 1, "eval_count": 1})
+            return _resp({})
+    monkeypatch.setattr(router.urllib.request, "urlopen", Net())
+    fake = _FakeClaude("A full Claude answer after the truncated bridge reply.")
+    monkeypatch.setattr(router, "_client", lambda: fake)
+    # glm truncated -> one-strike escalates up to a Claude tier
+    out = router.run("bulk", tier="glm")
+    assert out == "A full Claude answer after the truncated bridge reply."
+
+
+def test_log_write_never_crashes_dispatch(monkeypatch, tmp_path, capsys):
+    router = load_router(monkeypatch, tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file, not a dir")
+    monkeypatch.setattr(router, "_log_path", lambda: blocker / "sub" / "write.csv")
+    router._log("glm", "glm-5.2", "", 1, 2, "ok", via="test")   # must not raise
+    assert "usage-log write failed" in capsys.readouterr().err
+
+
+def test_csv_formula_injection_neutralised(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    assert router._csv_safe("=cmd|' /c calc'!A1") == "'=cmd|' /c calc'!A1"
+    assert router._csv_safe("+1+1") == "'+1+1"
+    assert router._csv_safe("glm-5.2") == "glm-5.2"   # normal value untouched
+
+
+def test_output_config_fallback_on_typeerror(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    calls = []
+
+    class Msgs:
+        def create(self, **kw):
+            calls.append(kw)
+            if "output_config" in kw:
+                raise TypeError("create() got an unexpected keyword argument 'output_config'")
+            return type("R", (), {"content": [type("B", (), {"text": "ok answer, long enough here"})()],
+                                  "usage": type("U", (), {"input_tokens": 1, "output_tokens": 2})(),
+                                  "stop_reason": "end_turn"})()
+
+    class Client:
+        messages = Msgs()
+    monkeypatch.setattr(router, "_client", lambda: Client())
+    out = router.run("normal task", tier="sonnet", effort="high")
+    assert out == "ok answer, long enough here"
+    assert len(calls) == 2 and "output_config" not in calls[1]   # retried without it

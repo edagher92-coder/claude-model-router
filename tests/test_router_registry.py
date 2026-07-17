@@ -92,7 +92,8 @@ def test_incomplete_detection(monkeypatch):
     router = load_router(monkeypatch)
 
     assert router._is_incomplete("", None)
-    assert router._is_incomplete("short.", None)
+    assert router._is_incomplete("short", None)          # short, no terminator
+    assert not router._is_incomplete("Done.", None)      # terse but complete (Kimi #9)
     assert router._is_incomplete("a perfectly long answer that got cut off mid", "max_tokens")
     assert router._is_incomplete("I can't help with that request as stated, because", "end_turn")
     assert not router._is_incomplete("Here is a complete, confident answer to the task.", "end_turn")
