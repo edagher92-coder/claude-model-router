@@ -83,7 +83,9 @@ GLM_CARD = (
     "dates, or citations; mark anything unverified in self_check.unverified. "
     "You are never the final authority on customer-facing numbers, legal, or "
     "high-stakes judgement — flag those for a Claude-tier review in "
-    "self_check.concerns. Return only the structured result envelope."
+    "self_check.concerns. Return only the structured result envelope. Copy "
+    "run_id and task_id EXACTLY from the task envelope you were given; "
+    "'status' must be exactly one of: completed, needs_input, failed."
 )
 
 # What a worker must return; passed to the API as a forced-choice tool schema
@@ -352,6 +354,20 @@ def delegate(
     message = build_worker_message(env, workspace_root, store)
 
     result = caller(WORKER_MODELS[env["assigned_model"]], system_prompt, message, SUBMIT_RESULT_TOOL)
+
+    # Transport-identity fields are orchestrator-authoritative — the worker
+    # echoing them adds no information, and open-weight workers routinely
+    # mangle them (observed live: GLM 5.2 returned placeholder run_id/version).
+    # Stamp them; status/self_check/summary remain the worker's own claims.
+    result["envelope_version"] = ENVELOPE_VERSION
+    result["run_id"] = env["run_id"]
+    result["task_id"] = env["task_id"]
+    if env["assigned_model"] == "glm-5.2":
+        # Light-touch status normalisation for the bridge worker only.
+        synonyms = {"success": "completed", "complete": "completed", "done": "completed",
+                    "ok": "completed", "error": "failed"}
+        raw = str(result.get("status", "")).strip().lower()
+        result["status"] = synonyms.get(raw, raw)
 
     errors = validate_result_envelope(result, env["run_id"], env["task_id"])
     if errors:

@@ -275,3 +275,25 @@ def test_bad_role_rejected():
         "acceptance_checks": ["c"], "role": "boss",
     })
     assert any("role" in e for e in errs)
+
+
+# --------------------------------------------------------------------------- #
+# Live-found: open-weight workers mangle transport-identity fields
+# --------------------------------------------------------------------------- #
+def test_bridge_worker_identity_fields_are_stamped(cards_dir, store):
+    """GLM returned placeholder run_id/envelope_version and 'status: success'
+    live (2026-07-17). delegate() must stamp identity fields and normalise the
+    bridge worker's status synonyms — content fields stay the worker's own."""
+    def caller_for(model):
+        def mangled(model_id, system, message, tool):
+            return {"envelope_version": "x.y", "run_id": "WRONG", "task_id": "T999",
+                    "status": "success", "summary": "real content",
+                    "self_check": {"verified": [], "unverified": []}}
+        return mangled
+
+    env = {"envelope_version": "1.0", "run_id": "R1", "task_id": "T001",
+           "objective": "summarise the corpus", "assigned_model": "glm-5.2",
+           "task_type": "analysis", "acceptance_checks": ["done"], "role": "worker"}
+    result = core.orchestrate(env, caller_for, store, cards_dir=cards_dir)
+    assert result["run_id"] == "R1" and result["task_id"] == "T001"
+    assert result["status"] == "completed" and result["summary"] == "real content"
