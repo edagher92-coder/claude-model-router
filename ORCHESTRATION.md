@@ -60,15 +60,33 @@ report to `bench/reports/`. Route by the latest report, not by memory —
 particularly the price-honesty column, which decides whether a model can be
 trusted anywhere near customer-facing drafting (even non-stakes).
 
+**Auto-allocation (added 2026-07-17):** the router picks the glm tier's model
+itself from the latest committed report — clean sweep on all probes (including
+the two business-critical ones: price-honesty and tier-math), lowest average
+latency wins. Weekly loop: Monday's bench commits a fresh report → every
+machine that pulls re-allocates automatically. Env overrides
+(`CLAUDE_ROUTER_GLM_MODEL` > `GLM_OLLAMA_TAG`) always win; disable with
+`CLAUDE_ROUTER_AUTO_ALLOCATE=0`; `--doctor` shows the active allocation and why.
+
 Baseline mapping (see the latest report for current truth):
 
 | Work | First choice | Notes |
 |---|---|---|
-| Long summaries, digests, first drafts | GLM 5.2 | free quota-wise; never final authority |
+| Long summaries, digests, first drafts | bench winner (2026-07-17: **GLM 5.2**) | free quota-wise; never final authority |
+| Bulk non-stakes code drafts | kimi-k2.7-code | clean sweep incl. tier-math; code specialist |
 | Most coding, reviews, agentic steps | Sonnet 5 | the workhorse |
 | Mechanical extract/reformat | Haiku 4.5 | fast + cheap |
 | Architecture, security, hard debugging | Opus 4.8 | also the sub-manager tier |
 | Plan, synthesis, final judgement | Fable 5 | the session itself |
+
+Measured caveats from the 2026-07-17 run (re-check weekly):
+- **nemotron-3-nano:30b answered "1" on tier-math — it rounds DOWN** (would
+  underquote). Mechanical transforms only; never near quoting logic.
+- **deepseek-v4-pro / mistral-large-3:675b** got the maths right but ignored
+  "answer with just the number" until token-capped — weak instruction-following
+  disqualifies them from structured-envelope pipeline work for now.
+- **qwen3.5:397b** — fastest overall but returned one empty reply (21s stall);
+  watch flakiness before promoting it.
 
 ## Cadence
 
