@@ -25,7 +25,10 @@ jobs:
             echo "OLLAMA_API_KEY not set - nothing to do. Add the secret to enable the weekly bench."
             exit 0
           fi
-          python3 bench/model_bench.py
+          # --discover auto-includes any NEW cloud model the bridge lists, so a
+          # release like Kimi K3 Max is benched the first run after it lands,
+          # with no code change. Runs on GitHub's servers -> works with the PC off.
+          python3 bench/model_bench.py --discover
       - name: Commit report
         run: |
           if [ -n "$(git status --porcelain bench/reports)" ]; then
