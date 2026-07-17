@@ -46,6 +46,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import sys
 import time
 import urllib.error
@@ -121,8 +122,44 @@ _ALLOWED_HOSTNAMES = {"localhost", "ollama.com"}
 
 
 def _extra_allowed_hosts() -> set[str]:
-    raw = os.getenv("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "")
-    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+    # Strip an optional :port so an allowlist entry like "host:11434" matches
+    # parsed.hostname (which has no port) — Kimi review #8.
+    hosts: set[str] = set()
+    for h in os.getenv("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "").split(","):
+        h = h.strip().lower()
+        if not h:
+            continue
+        if h.count(":") == 1:  # host:port (not a bare IPv6 literal)
+            h = h.rsplit(":", 1)[0]
+        hosts.add(h)
+    return hosts
+
+
+def _host_resolves_private(host: str) -> bool:
+    """True iff EVERY DNS resolution of host is loopback / RFC1918 / Tailscale
+    CGNAT. The authoritative anti-SSRF check at DISPATCH time — it closes both
+    the single-label-name gap (a bare name resolving to a public host) and DNS
+    rebinding (an allowed name flipping to 169.254.169.254 between check and
+    use). Kimi review #1 + #5. Fail closed on resolution error."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    saw = False
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr.split("%")[0])  # strip IPv6 zone id
+        except ValueError:
+            return False
+        saw = True
+        if ip.is_link_local:
+            return False  # 169.254.169.254 metadata etc. — is_private also covers
+            #               link-local, so this MUST be checked first.
+        if ip.is_loopback or ip.is_private or ip in ipaddress.ip_network("100.64.0.0/10"):
+            continue
+        return False  # a public IP among the results -> reject
+    return saw
 
 
 def is_allowed_base(url: str) -> tuple[bool, str]:
@@ -299,6 +336,27 @@ def _client():
     if _CLIENT is None:
         _CLIENT = anthropic.Anthropic()
     return _CLIENT
+
+
+def _create_message(request: dict):
+    """messages.create with a graceful fallback for the effort control
+    (Kimi review #2): `output_config={"effort": ...}` is a newer/beta field —
+    on an SDK or API that doesn't accept it, retry once WITHOUT it rather than
+    hard-failing the whole dispatch. Effort is an optimisation, not a
+    requirement; every other error propagates untouched."""
+    try:
+        return _client().messages.create(**request)
+    except TypeError as exc:
+        if "output_config" in request and "output_config" in str(exc):
+            request.pop("output_config", None)
+            return _client().messages.create(**request)
+        raise
+    except anthropic.APIStatusError as exc:
+        if ("output_config" in request and getattr(exc, "status_code", None) == 400
+                and "output_config" in str(getattr(exc, "message", "") or exc).lower()):
+            request.pop("output_config", None)
+            return _client().messages.create(**request)
+        raise
 
 
 def _ollama_bases() -> list[tuple[str, str]]:
@@ -493,7 +551,7 @@ def run(
         via = "?"
         if MODEL_REGISTRY[current_tier].engine == "ollama":
             try:
-                text, input_tokens, output_tokens, used_base = _ollama_generate(model_id, task, max_tokens)
+                text, input_tokens, output_tokens, used_base, stop_reason = _ollama_generate(model_id, task, max_tokens)
                 via = _via_label(used_base, model_id)
             except Exception as exc:
                 # Bridge down or tag missing = infra failure, not capability:
@@ -525,7 +583,7 @@ def run(
             if requested_effort:
                 request["output_config"] = {"effort": requested_effort}
             try:
-                response = _client().messages.create(**request)
+                response = _create_message(request)
             except anthropic.APIStatusError as exc:
                 # Fable can be unavailable or permission-restricted on some accounts.
                 # Fall back one tier for access/availability errors, but re-raise all other errors.
@@ -728,14 +786,19 @@ def _reroute_offline(tier: str, stakes: bool) -> str:
 
 
 def _is_incomplete(text: str, stop_reason: Optional[str]) -> bool:
-    """True when a reply should trigger the one-strike escalation: empty or
-    very short, truncated by the token cap, or an outright refusal."""
+    """True when a reply should trigger the one-strike escalation: token-cap
+    truncation, an outright refusal, or a suspiciously short answer that does
+    NOT look deliberately terse. A short reply ending in sentence punctuation
+    ("Done.", "42.", "Yes!") is treated as complete — don't burn quota
+    escalating it (Kimi review #9)."""
     stripped = text.strip()
-    if len(stripped) < 20:
-        return True
     if stop_reason == "max_tokens":
         return True
-    return stripped.lower().startswith(REFUSAL_PREFIXES)
+    if stripped.lower().startswith(REFUSAL_PREFIXES):
+        return True
+    if len(stripped) < 20 and not stripped.endswith((".", "!", "?")):
+        return True
+    return False
 
 
 def _next_tier_up(tier: str, tried: set[str], stakes: bool, claude_ok: bool = True) -> Optional[str]:
@@ -764,14 +827,34 @@ def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str,
             errors.append(f"{base}: unreachable")
             continue
         try:
-            text, in_tok, out_tok = _generate_at(base, api_key, model_tag, prompt, max_tokens)
-            return text, in_tok, out_tok, base
+            text, in_tok, out_tok, done = _generate_at(base, api_key, model_tag, prompt, max_tokens)
+            return text, in_tok, out_tok, base, done
         except Exception as exc:  # noqa: BLE001 - every base gets its shot
             errors.append(f"{base}: {exc}")
     raise RuntimeError("Ollama bridge failed — " + "; ".join(errors))
 
 
-def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int]:
+def _dispatch_ssrf_ok(base: str) -> None:
+    """DNS-rebinding / single-label guard at the moment of dispatch (Kimi #1+#5).
+    IP literals were already range-checked in is_allowed_base; ollama.com and
+    an explicitly-allowlisted host are intentional public targets. Every other
+    hostname must resolve to a private/loopback/Tailscale IP right now."""
+    host = (urllib.parse.urlparse(base).hostname or "").lower()
+    if not host:
+        raise RuntimeError(f"invalid Ollama base (no host): {base}")
+    try:
+        ipaddress.ip_address(host)
+        return  # IP literal: already validated by is_allowed_base
+    except ValueError:
+        pass
+    if host == "ollama.com" or host in _extra_allowed_hosts():
+        return  # intentional public target
+    if not _host_resolves_private(host):
+        raise RuntimeError(f"SSRF guard: '{host}' did not resolve to a private/loopback/Tailscale IP")
+
+
+def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int, Optional[str]]:
+    _dispatch_ssrf_ok(base)
     payload = json.dumps({
         "model": model_tag,
         "prompt": prompt,
@@ -789,7 +872,10 @@ def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_token
     text = (body.get("response") or "").strip()
     if not text:
         raise ValueError(f"no response from Ollama: {str(body.get('error', body))[:200]}")
-    return text, int(body.get("prompt_eval_count") or 0), int(body.get("eval_count") or 0)
+    # Ollama signals token-cap truncation via done_reason == "length"; surface
+    # it so the one-strike escalation fires on a truncated bridge reply (Kimi #3).
+    done_reason = "max_tokens" if body.get("done_reason") == "length" else None
+    return text, int(body.get("prompt_eval_count") or 0), int(body.get("eval_count") or 0), done_reason
 
 
 def _classify(task: str) -> str:
@@ -916,25 +1002,40 @@ def _response_text(response: object) -> str:
     return "\n".join(texts).strip()
 
 
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: object) -> str:
+    """Neutralise spreadsheet formula injection (Kimi review #6): a field
+    beginning with =/+/-/@ executes as a formula when the CSV is opened in
+    Excel/Sheets. csv.writer quotes commas but does NOT stop this. Prefix a
+    single quote so the cell is treated as text. model_id/via can carry
+    env-influenced values, so this matters."""
+    s = str(value)
+    if s.startswith(_CSV_FORMULA_TRIGGERS):
+        return "'" + s
+    return s
+
+
 def _log(tier: str, model_id: str, effort: str, in_tok: int, out_tok: int, status: str,
          via: str = "") -> None:
-    path = _log_path()
-    is_new = not path.exists()
-    with open(path, "a", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        if is_new:
-            writer.writerow(["timestamp_utc", "tier", "model_id", "effort",
-                             "input_tokens", "output_tokens", "status", "via"])
-        writer.writerow([
-            dt.datetime.now(dt.timezone.utc).isoformat(),
-            tier,
-            model_id,
-            effort,
-            in_tok,
-            out_tok,
-            status,
-            via,
-        ])
+    # Logging must NEVER break a dispatch that already spent an API call
+    # (Kimi review #4): make the dir and swallow any write error.
+    try:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not path.exists()
+        with open(path, "a", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            if is_new:
+                writer.writerow(["timestamp_utc", "tier", "model_id", "effort",
+                                 "input_tokens", "output_tokens", "status", "via"])
+            writer.writerow([_csv_safe(v) for v in (
+                dt.datetime.now(dt.timezone.utc).isoformat(),
+                tier, model_id, effort, in_tok, out_tok, status, via,
+            )])
+    except Exception as exc:  # noqa: BLE001 - a log write must not crash a real dispatch
+        print(f"[router] usage-log write failed: {exc}", file=sys.stderr, flush=True)
 
 
 def last_dispatches(count: int = 10) -> list[dict]:
