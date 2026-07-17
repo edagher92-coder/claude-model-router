@@ -462,3 +462,130 @@ def test_usage_log_records_via_and_last_dispatches(monkeypatch, tmp_path):
     rows = router.last_dispatches(5)
     assert rows and rows[-1]["status"] == "ok"
     assert "compute on Ollama Cloud (ONLINE)" in rows[-1]["via"]
+
+
+# --------------------------------------------------------------------------- #
+# Status-line file for the desktop app (added 2026-07-17)
+# --------------------------------------------------------------------------- #
+def test_engine_of_maps_via_labels(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    assert router._engine_of("Anthropic API (ONLINE)") == "anthropic"
+    assert router._engine_of("Ollama Cloud (ONLINE)") == "cloud"
+    assert router._engine_of("routing server 100.x -> ':cloud' tag, compute on Ollama Cloud (ONLINE)") == "cloud"
+    assert router._engine_of("local daemon (OFFLINE/on-prem)") == "local"
+
+
+def test_dispatch_writes_routing_status(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, ollama_url="https://ollama.com", ollama_key="k")
+    net = FakeOllamaNet({"https://ollama.com": LONG})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    status_path = tmp_path / ".routing-status.json"
+    monkeypatch.setattr(router, "ROUTING_STATUS_FILE", status_path)
+
+    router.run("bulk digest", tier="glm")
+    state = json.loads(status_path.read_text())
+    assert state["engine"] == "cloud" and state["tier"] == "glm" and "ts" in state
+
+    monkeypatch.setenv("CLAUDE_ROUTER_STATUS", "0")   # kill switch
+    status_path.unlink()
+    router.run("again", tier="glm")
+    assert not status_path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# SEVERE #1 — stakes end-to-end (keyword backstop, not caller-optional)
+# --------------------------------------------------------------------------- #
+def test_looks_like_stakes_is_precise_and_lenient(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    # customer money/legal -> stakes
+    for s in ["draft the invoice for the refund", "process the $500 chargeback",
+              "the GST tax invoice", "send a payment link", "review the contract terms and conditions"]:
+        assert router.looks_like_stakes(s), s
+    # engineering / analysis -> NOT stakes (lenient: runs on the bridge)
+    for s in ["run a top-to-bottom valuation and review of the router",
+              "audit the codebase", "refactor the pricing module", "evaluate the models",
+              "summarise this research corpus", "review this pull request"]:
+        assert not router.looks_like_stakes(s), s
+
+
+class _FakeClaude:
+    def __init__(self, text="CLAUDE ANSWER, complete and long enough to pass"):
+        self._text = text
+        class _M:
+            def create(_s, **kw):
+                self.seen_model = kw["model"]
+                return type("R", (), {
+                    "content": [type("B", (), {"text": self._text})()],
+                    "usage": type("U", (), {"input_tokens": 1, "output_tokens": 3})(),
+                    "stop_reason": "end_turn"})()
+        self.messages = _M()
+
+
+def test_stakes_keyword_forces_claude_and_never_hits_bridge(monkeypatch, tmp_path, capsys):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="test-key")
+    fake = _FakeClaude()
+    monkeypatch.setattr(router, "_client", lambda: fake)
+    # Hard proof: the bridge path must never be entered for a stakes task.
+    def _boom(*a, **k):
+        raise AssertionError("stakes task reached the Ollama bridge!")
+    monkeypatch.setattr(router, "_ollama_generate", _boom)
+
+    # Caller FORGOT stakes=True and even asked for the glm tier explicitly.
+    out = router.run("draft the invoice email for the Merivale refund", tier="glm")
+    assert out == "CLAUDE ANSWER, complete and long enough to pass"
+    assert fake.seen_model == "claude-sonnet-5"   # glm -> rerouted to Claude
+    assert "NUMBERS RULE" in capsys.readouterr().err
+
+
+def test_stakes_keyword_offline_refuses(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")  # no claude
+    net = FakeOllamaNet({"http://alive:11434": LONG})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    try:
+        router.run("send the customer their $450 tax invoice", tier="glm")
+    except router.RouterSetupError as exc:
+        assert "NUMBERS RULE" in str(exc)
+    else:
+        raise AssertionError("stakes task offline must refuse, not hit the bridge")
+
+
+def test_lenient_review_task_runs_on_bridge_offline(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
+    net = FakeOllamaNet({"http://alive:11434": LONG})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    # A model valuation / code review is NOT stakes — strongest bridge model runs it.
+    assert router.run("run a top-to-bottom valuation and review of the router") == LONG
+
+
+# --------------------------------------------------------------------------- #
+# SEVERE #2 — SSRF allowlist on the Ollama base URL
+# --------------------------------------------------------------------------- #
+def test_ssrf_allow_and_block_matrix(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    ok = ["http://localhost:11434", "http://127.0.0.1:11434", "https://ollama.com",
+          "http://100.122.28.89:11434", "http://192.168.1.10:11434", "http://10.0.0.5:11434",
+          "http://elzydlab.tail76b098.ts.net:11434"]
+    bad = ["http://169.254.169.254/latest/meta-data/", "file:///etc/passwd",
+           "http://attacker.com/steal", "https://8.8.8.8", "ftp://localhost/x",
+           "gopher://127.0.0.1"]
+    for u in ok:
+        assert router.is_allowed_base(u)[0], u
+    for u in bad:
+        assert not router.is_allowed_base(u)[0], u
+
+
+def test_ssrf_explicit_allowlist_opens_a_public_host(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    assert not router.is_allowed_base("http://my-gpu-box.example.com:11434")[0]
+    monkeypatch.setenv("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "my-gpu-box.example.com")
+    assert router.is_allowed_base("http://my-gpu-box.example.com:11434")[0]
+
+
+def test_ssrf_blocked_base_is_dropped_from_chain(monkeypatch, tmp_path, capsys):
+    router = load_router(monkeypatch, tmp_path,
+                         ollama_url="http://169.254.169.254,http://100.122.28.89:11434",
+                         ollama_key="k")
+    bases = [b for b, _ in router._ollama_bases()]
+    assert "http://169.254.169.254" not in bases
+    assert "http://100.122.28.89:11434" in bases
+    assert "BLOCKED" in capsys.readouterr().err

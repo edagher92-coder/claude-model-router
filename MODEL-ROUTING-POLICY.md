@@ -130,9 +130,23 @@ calling out explicitly:
    effort-first step of this gate isn't actually being applied, worth a spot-check rather than
    assuming the mix is simply "this session was hard."
 
-This account's routing already implements the recommended three-layer structure (deterministic
-STAKES regex gate → cheap classifier pass → cascade-with-escalation) described in that literature —
-worth naming explicitly since it wasn't documented as a deliberate pattern before this pass.
+This account's routing implements the recommended three-layer structure (deterministic STAKES regex
+gate → cheap classifier pass → cascade-with-escalation) described in that literature:
+
+1. **Deterministic STAKES regex gate** — `router.py`'s `looks_like_stakes()` (mirrored in
+   `hq_orchestrator/core.py`) forces any customer money/legal task onto a Claude tier *before*
+   classification, regardless of the caller's `stakes` flag. It is high-precision and lenient: a
+   code review, a model valuation, or a pricing-*module* refactor is **not** stakes and runs on the
+   bridge; only genuine customer commerce/legal (invoice, refund, GST, payment link, an actual
+   `$amount`, contract terms) is caught. Add terms per-deployment with `CLAUDE_ROUTER_STAKES_KEYWORDS`.
+2. **Cheap classifier pass** — the Haiku classifier picks a starting tier for non-stakes work.
+3. **Cascade-with-escalation** — the one-strike incompleteness escalation (a crude 20-char/`max_tokens`
+   floor, per the note above — not a calibrated confidence signal).
+
+Note on the effort-first ("80%-then-ROI") gate above: that is **operating policy for the harness and
+sessions** (the `/auto-escalate` skill applies it across model+effort dials), not something `router.py`
+enforces per API call — `router.py` escalates by tier on the incompleteness signal. The two layers are
+complementary, not the same mechanism.
 
 ## Domain guidance
 

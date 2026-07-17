@@ -22,10 +22,19 @@ MAX_ORCHESTRATION_DEPTH = 2
 
 ENVELOPE_ROLES = {"worker", "orchestrator"}
 
-# Money-ish objective wording that must never reach the Ollama bridge even when
-# the envelope forgot stakes:true (NUMBERS RULE keyword backstop).
+# CUSTOMER money/legal wording that must never reach the Ollama bridge even when
+# the envelope forgot stakes:true (NUMBERS RULE keyword backstop). Deliberately
+# HIGH-PRECISION and lenient: engineering work — a code review, a model
+# valuation, refactoring the pricing MODULE, auditing the router — is NOT stakes
+# and belongs on the week's strongest bridge model. Only genuine customer
+# commerce/legal + an actual dollar amount is caught. Keep in step with
+# router.py's _STAKES_HINT_RE (intentional duplication: no cross-package import).
 _STAKES_HINT_RE = re.compile(
-    r"(?i)\b(price|pricing|quote|quoting|invoice|refund|deposit|payment|charge|GST|legal|contract)\b|\$"
+    r"(?i)"
+    r"\b(invoice|refund|chargeback|remittance|payable|payslip|superannuation)\b"
+    r"|\b(tax\s+invoice|purchase\s+order|payment\s+link|credit\s+card|bank\s+details|bsb|abn|gst)\b"
+    r"|\bliability\b|\bindemnif|terms\s+(?:and|&)\s+conditions|\blegal\s+(?:advice|letter|contract)\b"
+    r"|\$\s?\d"
 )
 
 # Appended to a sub-manager's system prompt when role == "orchestrator": it may

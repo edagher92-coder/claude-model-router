@@ -20,10 +20,13 @@ never dispatch customer-facing price/quote/invoice/legal tasks here.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 RETRY_DELAYS = (2, 4, 8, 16)
@@ -41,8 +44,50 @@ def _api_key() -> str:
     return os.environ.get("OLLAMA_API_KEY", "").strip()
 
 
+# --- SSRF guard: identical policy to router.is_allowed_base. Duplicated (not
+# imported) because this package is stdlib-only and must not depend on router.py.
+_ALLOWED_SCHEMES = {"http", "https"}
+_ALLOWED_HOSTNAMES = {"localhost", "ollama.com"}
+
+
+def is_allowed_base(url: str) -> tuple[bool, str]:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        return False, f"unparseable URL: {exc}"
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        return False, f"scheme '{parsed.scheme}' not allowed"
+    host = parsed.hostname
+    if not host:
+        return False, "no host"
+    host_l = host.lower()
+    extra = {h.strip().lower() for h in os.environ.get("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "").split(",") if h.strip()}
+    if host_l in extra:
+        return True, "allowlisted"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback:
+            return True, "loopback"
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True, "tailscale"
+        if ip.is_link_local:
+            return False, "link-local/metadata blocked (SSRF)"
+        if ip.is_private:
+            return True, "private"
+        return False, f"public IP {host} blocked (SSRF)"
+    if host_l in _ALLOWED_HOSTNAMES or host_l.endswith(".ts.net"):
+        return True, "allowed hostname"
+    if "." not in host_l:                           # single-label = LAN, not public
+        return True, "single-label LAN hostname"
+    return False, f"public host '{host}' blocked (SSRF)"
+
+
 def _bases() -> list[str]:
-    """Priority-ordered base URLs — keep in step with router._ollama_bases."""
+    """Priority-ordered base URLs — keep in step with router._ollama_bases.
+    SSRF-filtered: a rejected base is dropped with a warning, never dispatched."""
     key = _api_key()
     raw = os.environ.get("CLAUDE_ROUTER_OLLAMA_URL", "").strip()
     urls = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
@@ -52,13 +97,40 @@ def _bases() -> list[str]:
         urls.append("https://ollama.com")
     deduped: list[str] = []
     for url in urls:
-        if url not in deduped:
-            deduped.append(url)
+        if url in deduped:
+            continue
+        ok, reason = is_allowed_base(url)
+        if not ok:
+            print(f"[ollama_caller] BLOCKED base {url!r}: {reason}", file=sys.stderr, flush=True)
+            continue
+        deduped.append(url)
     return deduped
 
 
 def _tag(model: str) -> str:
-    return os.environ.get(_TAG_ENV[model], "").strip() or _DEFAULT_TAGS[model]
+    """Resolve the Ollama model tag. Precedence matches the router so the two
+    never disagree: GLM_OLLAMA_TAG env > router bench auto-allocation >
+    registry default. The bench winner (e.g. kimi-k2.7-code on a strong week)
+    is used verbatim as the tag."""
+    env_tag = os.environ.get(_TAG_ENV[model], "").strip()
+    if env_tag:
+        return env_tag
+    if model == "glm-5.2":
+        allocated = _bench_allocated_tag()
+        if allocated:
+            return allocated
+    return _DEFAULT_TAGS[model]
+
+
+def _bench_allocated_tag() -> str:
+    """The router's current bench allocation, if importable. Guarded so the
+    orchestrator still works standalone (returns '' -> caller uses the default)."""
+    try:
+        import router  # sibling module at repo root
+        alloc = router.bench_allocation()
+        return alloc["model"] if alloc else ""
+    except Exception:
+        return ""
 
 
 def is_ollama_model(model: str) -> bool:

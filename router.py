@@ -41,12 +41,15 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import ipaddress
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -70,6 +73,96 @@ class RouterSetupError(RuntimeError):
     The message always says what to set/start. `python router.py --doctor`
     prints the full setup table.
     """
+
+
+# --------------------------------------------------------------------------- #
+# NUMBERS RULE — stakes keyword backstop (end-to-end, not caller-optional)
+# --------------------------------------------------------------------------- #
+# CUSTOMER money/legal wording forces Claude-only even when the caller forgot
+# stakes=True. HIGH-PRECISION and lenient by design: a code review, a model
+# valuation, a top-to-bottom audit, or refactoring the pricing MODULE is NOT
+# stakes and runs happily on the week's strongest bridge model. Only genuine
+# customer commerce/legal + an actual dollar amount is caught. Keep in step with
+# hq_orchestrator/core.py's _STAKES_HINT_RE (intentional duplication — the two
+# live in different packages and must not import across).
+_STAKES_HINT_RE = re.compile(
+    r"(?i)"
+    r"\b(invoice|refund|chargeback|remittance|payable|payslip|superannuation)\b"
+    r"|\b(tax\s+invoice|purchase\s+order|payment\s+link|credit\s+card|bank\s+details|bsb|abn|gst)\b"
+    r"|\bliability\b|\bindemnif|terms\s+(?:and|&)\s+conditions|\blegal\s+(?:advice|letter|contract)\b"
+    r"|\$\s?\d"
+)
+
+
+def looks_like_stakes(task: str) -> bool:
+    """True when task text carries customer money/legal signal (see the regex).
+    Extra terms can be added per-deployment via CLAUDE_ROUTER_STAKES_KEYWORDS
+    (comma-separated, matched case-insensitively as whole words)."""
+    if not isinstance(task, str):
+        return False
+    if _STAKES_HINT_RE.search(task):
+        return True
+    extra = os.getenv("CLAUDE_ROUTER_STAKES_KEYWORDS", "").strip()
+    if extra:
+        terms = [re.escape(t.strip()) for t in extra.split(",") if t.strip()]
+        if terms and re.search(r"(?i)\b(" + "|".join(terms) + r")\b", task):
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# SSRF guard — the Ollama base URL is attacker-influencable (env), so validate
+# it before urllib ever touches it. Blocks file://, cloud-metadata IPs, and
+# arbitrary public hosts that would exfiltrate the prompt + Ollama key.
+# --------------------------------------------------------------------------- #
+_ALLOWED_SCHEMES = {"http", "https"}
+_ALLOWED_HOST_SUFFIXES = (".ts.net",)      # Tailscale MagicDNS
+_ALLOWED_HOSTNAMES = {"localhost", "ollama.com"}
+
+
+def _extra_allowed_hosts() -> set[str]:
+    raw = os.getenv("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def is_allowed_base(url: str) -> tuple[bool, str]:
+    """Return (ok, reason). Allow: http/https to loopback, RFC1918/ULA private,
+    Tailscale CGNAT (100.64/10) or *.ts.net, ollama.com, or an explicit host in
+    CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS. Reject everything else — notably
+    file://, 169.254.169.254 (cloud metadata), and arbitrary public URLs."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        return False, f"unparseable URL: {exc}"
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        return False, f"scheme '{parsed.scheme}' not allowed (http/https only)"
+    host = parsed.hostname
+    if not host:
+        return False, "no host in URL"
+    host_l = host.lower()
+    if host_l in _extra_allowed_hosts():
+        return True, "explicitly allowlisted host"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_loopback:
+            return True, "loopback"
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True, "Tailscale CGNAT range"
+        if ip.is_link_local:                       # 169.254/16 incl. cloud metadata
+            return False, "link-local/metadata IP blocked (SSRF)"
+        if ip.is_private:                          # 10/8, 172.16/12, 192.168/16, fc00::/7
+            return True, "private network"
+        return False, f"public IP {host} blocked (SSRF) — allowlist it explicitly if intended"
+    if host_l in _ALLOWED_HOSTNAMES or host_l.endswith(_ALLOWED_HOST_SUFFIXES):
+        return True, "allowed hostname"
+    if "." not in host_l:
+        # A single-label hostname (no dot) is a LAN/local name — it cannot be a
+        # public internet domain, so it can't exfiltrate to the open internet.
+        return True, "single-label LAN hostname"
+    return False, f"public host '{host}' blocked (SSRF) — set CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS to permit it"
 
 
 def _log_path() -> pathlib.Path:
@@ -227,9 +320,16 @@ def _ollama_bases() -> list[tuple[str, str]]:
     seen: set[str] = set()
     bases: list[tuple[str, str]] = []
     for url in urls:
-        if url not in seen:
-            seen.add(url)
-            bases.append((url, key))
+        if url in seen:
+            continue
+        seen.add(url)
+        ok, reason = is_allowed_base(url)
+        if not ok:
+            # SSRF guard: never dispatch to a rejected base. Warn loudly so a
+            # misconfigured URL is visible rather than silently swallowed.
+            print(f"[router] BLOCKED Ollama base {url!r}: {reason}", file=sys.stderr, flush=True)
+            continue
+        bases.append((url, key))
     return bases
 
 
@@ -292,6 +392,38 @@ def _announce(tier: str, model_id: str, via: str, seconds: float, out_tok: int, 
           file=sys.stderr, flush=True)
 
 
+# Written after every dispatch; read by the Claude Code status line
+# (claude_status_line.py) so the desktop app shows online/offline live.
+ROUTING_STATUS_FILE = pathlib.Path.home() / ".claude" / ".routing-status.json"
+
+
+def _engine_of(via: str) -> str:
+    """Collapse a via-label to the status-line engine key: anthropic | cloud | local."""
+    if "Anthropic" in via:
+        return "anthropic"
+    if "Ollama Cloud (ONLINE)" in via or "compute on Ollama Cloud" in via:
+        return "cloud"
+    return "local"
+
+
+def _write_routing_status(tier: str, model_id: str, via: str) -> None:
+    """Record the last dispatch for the status line. Never raises — a status
+    write must never break a real dispatch. Disable with CLAUDE_ROUTER_STATUS=0."""
+    if os.getenv("CLAUDE_ROUTER_STATUS", "1").strip().lower() in {"0", "false", "off"}:
+        return
+    try:
+        ROUTING_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ROUTING_STATUS_FILE.write_text(json.dumps({
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "engine": _engine_of(via),
+            "model": model_id,
+            "tier": tier,
+            "via": via,
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -329,15 +461,25 @@ def run(
             numbers, quotes, invoices, legal — the NUMBERS RULE): the glm
             tier is skipped in classification and escalation, and OFFLINE
             mode refuses rather than downgrade a stakes task to the bridge.
+            Even when False, a customer money/legal keyword in the task text
+            forces the same behaviour (looks_like_stakes) — so a forgotten
+            flag can never leak an invoice/refund to the open-weight bridge.
     """
     if not isinstance(task, str) or not task.strip():
         raise ValueError("task must be a non-empty string")
 
+    # End-to-end NUMBERS RULE: the flag is a floor, not the only trigger. A
+    # money/legal signal in the text promotes the task to stakes regardless.
+    effective_stakes = bool(stakes) or looks_like_stakes(task)
+    if effective_stakes and not stakes:
+        print("[router] stakes keyword detected — forcing Claude-only (NUMBERS RULE)",
+              file=sys.stderr, flush=True)
+
     claude_ok = anthropic_ready()
     current_tier = _normalise_tier(tier) if tier else _classify(task)
-    current_tier = _apply_stakes(current_tier, stakes)
+    current_tier = _apply_stakes(current_tier, effective_stakes)
     if not claude_ok:
-        current_tier = _reroute_offline(current_tier, stakes)
+        current_tier = _reroute_offline(current_tier, effective_stakes)
     tried: set[str] = set()
     last_text = ""
 
@@ -363,7 +505,7 @@ def run(
                 recovery = (
                     "sonnet"
                     if claude_ok and "sonnet" not in tried
-                    else _next_tier_up(current_tier, tried, stakes, claude_ok)
+                    else _next_tier_up(current_tier, tried, effective_stakes, claude_ok)
                 )
                 if recovery is None:
                     if last_text:
@@ -404,10 +546,11 @@ def run(
         # Policy hard rule: ONE failed or incomplete response at a tier =>
         # escalate immediately (empty/short, token-cap truncation, refusal).
         if _is_incomplete(text, stop_reason):
-            status = "escalated" if _next_tier_up(current_tier, tried, stakes, claude_ok) else "incomplete_at_top"
-            next_tier = _next_tier_up(current_tier, tried, stakes, claude_ok)
+            status = "escalated" if _next_tier_up(current_tier, tried, effective_stakes, claude_ok) else "incomplete_at_top"
+            next_tier = _next_tier_up(current_tier, tried, effective_stakes, claude_ok)
             _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
                  status, via=via)
+            _write_routing_status(current_tier, model_id, via)
             _announce(current_tier, model_id, via, time.time() - started, output_tokens, status)
             if next_tier is None:
                 return text  # top of ladder: surface what we have, honestly logged
@@ -415,6 +558,7 @@ def run(
             continue
 
         _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens, "ok", via=via)
+        _write_routing_status(current_tier, model_id, via)
         _announce(current_tier, model_id, via, time.time() - started, output_tokens, "ok")
         return text
 
