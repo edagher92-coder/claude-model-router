@@ -5,37 +5,37 @@
     "glm-5.2": {
       "extract": {
         "pass": true,
-        "latency_s": 1.3,
+        "latency_s": 1.4,
         "tokens": 13,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 2.0,
-        "tokens": 73,
-        "reply_head": "During trading periods, commercial slushy machines require a nightly strip-clean to prevent syrup from thickening and da"
+        "latency_s": 2.7,
+        "tokens": 57,
+        "reply_head": "Nightly strip-cleans prevent syrup from thickening and damaging the auger motor, while weekly deep-cleans of the bowl se"
       },
       "code": {
         "pass": true,
-        "latency_s": 0.9,
-        "tokens": 35,
-        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = [c.lower() for c in s if c.isalnum()]\n    return cleaned == cleaned[::-1]\n"
+        "latency_s": 1.5,
+        "tokens": 48,
+        "reply_head": "```python\ndef is_palindrome(s: str) -> bool:\n    import re\n    cleaned = re.sub(r'[^a-zA-Z0-9]', '', s).lower()\n    retu"
       },
       "reason": {
         "pass": true,
-        "latency_s": 1.0,
+        "latency_s": 1.2,
         "tokens": 2,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 1.0,
+        "latency_s": 1.2,
         "tokens": 2,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": true,
-        "latency_s": 3.8,
+        "latency_s": 1.2,
         "tokens": 2,
         "reply_head": "2"
       }
@@ -43,37 +43,37 @@
     "qwen3.5:397b": {
       "extract": {
         "pass": false,
-        "latency_s": 21.3,
+        "latency_s": 3.1,
         "tokens": 300,
         "reply_head": ""
       },
       "summarise": {
         "pass": true,
-        "latency_s": 1.6,
-        "tokens": 65,
-        "reply_head": "Commercial slushy machines require a nightly strip-clean to prevent syrup buildup that strains the auger motor, which is"
+        "latency_s": 1.2,
+        "tokens": 66,
+        "reply_head": "Commercial slushy machines require nightly strip-cleans to prevent syrup buildup that strains the auger motor, the leadi"
       },
       "code": {
         "pass": true,
-        "latency_s": 1.0,
+        "latency_s": 0.9,
         "tokens": 43,
         "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(char.lower() for char in s if char.isalnum())\n    return cleaned ="
       },
       "reason": {
         "pass": true,
-        "latency_s": 2.4,
+        "latency_s": 0.6,
         "tokens": 6,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 4.0,
+        "latency_s": 0.6,
         "tokens": 6,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": true,
-        "latency_s": 0.7,
+        "latency_s": 0.8,
         "tokens": 6,
         "reply_head": "2"
       }
@@ -81,75 +81,75 @@
     "gpt-oss:120b": {
       "extract": {
         "pass": true,
-        "latency_s": 1.9,
-        "tokens": 101,
+        "latency_s": 1.5,
+        "tokens": 89,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 3.9,
-        "tokens": 300,
-        "reply_head": "Commercial slushy machines require a nightly strip\u2011clean because syrup left in the bowl overnight thickens, blocks the t"
+        "latency_s": 4.0,
+        "tokens": 290,
+        "reply_head": "Commercial slushy machines must be strip\u2011cleaned each night and have their bowl seals deep\u2011cleaned weekly, because syrup"
       },
       "code": {
         "pass": true,
-        "latency_s": 2.4,
-        "tokens": 134,
-        "reply_head": "```python\ndef is_palindrome(s: str) -> bool:\n    cleaned = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return cl"
+        "latency_s": 3.0,
+        "tokens": 200,
+        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return cleaned == clea"
       },
       "reason": {
         "pass": true,
-        "latency_s": 1.2,
-        "tokens": 41,
+        "latency_s": 1.0,
+        "tokens": 17,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 2.5,
-        "tokens": 158,
+        "latency_s": 1.7,
+        "tokens": 84,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": true,
-        "latency_s": 1.8,
-        "tokens": 146,
+        "latency_s": 2.9,
+        "tokens": 113,
         "reply_head": "2"
       }
     },
     "kimi-k2.7-code": {
       "extract": {
         "pass": true,
-        "latency_s": 4.2,
+        "latency_s": 1.0,
         "tokens": 13,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 1.7,
-        "tokens": 64,
-        "reply_head": "Regular nightly strip-cleaning prevents syrup thickening that blocks taps and overworks auger motors, the leading cause "
+        "latency_s": 1.6,
+        "tokens": 55,
+        "reply_head": "Regular cleaning prevents common slushy machine breakdowns, as overnight syrup residue thickens, blocks taps and strains"
       },
       "code": {
         "pass": true,
-        "latency_s": 1.5,
+        "latency_s": 1.3,
         "tokens": 39,
-        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(c.lower() for c in s if c.isalnum())\n    return cleaned == cleaned"
+        "reply_head": "```python\ndef is_palindrome(s):\n    filtered = ''.join(c.lower() for c in s if c.isalnum())\n    return filtered == filte"
       },
       "reason": {
         "pass": true,
-        "latency_s": 1.3,
+        "latency_s": 0.9,
         "tokens": 3,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 1.2,
+        "latency_s": 1.0,
         "tokens": 2,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": true,
-        "latency_s": 1.4,
+        "latency_s": 1.0,
         "tokens": 2,
         "reply_head": "2"
       }
@@ -157,57 +157,57 @@
     "nemotron-3-nano:30b": {
       "extract": {
         "pass": true,
-        "latency_s": 1.0,
+        "latency_s": 0.7,
         "tokens": 13,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 2.8,
-        "tokens": 91,
-        "reply_head": "Commercial slushy machines require a nightly strip-clean of the syrup bowl during operating hours to prevent thickening "
+        "latency_s": 1.4,
+        "tokens": 74,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean during trading hours, as syrup left overnight thickens and bloc"
       },
       "code": {
         "pass": true,
-        "latency_s": 1.1,
+        "latency_s": 1.0,
         "tokens": 35,
         "reply_head": "def is_palindrome(s):\n    filtered = [c.lower() for c in s if c.isalnum()]\n    return filtered == filtered[::-1]"
       },
       "reason": {
         "pass": true,
-        "latency_s": 2.4,
+        "latency_s": 0.6,
         "tokens": 3,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 0.7,
+        "latency_s": 1.6,
         "tokens": 3,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
-        "pass": false,
-        "latency_s": 0.8,
+        "pass": true,
+        "latency_s": 0.7,
         "tokens": 2,
-        "reply_head": "1"
+        "reply_head": "2"
       }
     },
     "deepseek-v4-pro": {
       "extract": {
         "pass": true,
-        "latency_s": 1.0,
+        "latency_s": 1.1,
         "tokens": 13,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 1.9,
-        "tokens": 82,
-        "reply_head": "Commercial slushy machines require a nightly strip-clean to prevent syrup from thickening and blocking the tap, which st"
+        "latency_s": 1.2,
+        "tokens": 66,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean to prevent syrup from thickening and damaging the motor, which "
       },
       "code": {
         "pass": true,
-        "latency_s": 1.5,
+        "latency_s": 1.1,
         "tokens": 38,
         "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(c.lower() for c in s if c.isalnum())\n    return cleaned == cleaned"
       },
@@ -219,29 +219,29 @@
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 2.2,
+        "latency_s": 1.2,
         "tokens": 3,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": false,
-        "latency_s": 2.3,
-        "tokens": 163,
-        "reply_head": "Let\u2019s break it down:  \n\n- Total serves needed: **460**  \n- Base package covers: **240** serves  \n- Remaining needed: \\( "
+        "latency_s": 1.4,
+        "tokens": 90,
+        "reply_head": "Let\u2019s break it down:  \n\n- Total serves needed: 460  \n- Base package covers: 240 serves  \n- Remaining serves needed: 460 "
       }
     },
     "mistral-large-3:675b": {
       "extract": {
         "pass": true,
-        "latency_s": 1.2,
+        "latency_s": 0.9,
         "tokens": 13,
         "reply_head": "kim@venue.com.au\nops@slushfest.com"
       },
       "summarise": {
         "pass": true,
-        "latency_s": 2.7,
-        "tokens": 57,
-        "reply_head": "Commercial slushy machines require nightly cleaning to prevent syrup buildup, which clogs taps and strains motors\u2014leadin"
+        "latency_s": 2.4,
+        "tokens": 66,
+        "reply_head": "Commercial slushy machines require nightly cleaning to prevent syrup buildup that clogs taps and strains motors, the top"
       },
       "code": {
         "pass": true,
@@ -251,21 +251,439 @@
       },
       "reason": {
         "pass": true,
-        "latency_s": 0.9,
+        "latency_s": 1.0,
         "tokens": 3,
         "reply_head": "Carol"
       },
       "price-honesty": {
         "pass": true,
-        "latency_s": 3.2,
+        "latency_s": 0.9,
         "tokens": 3,
         "reply_head": "UNKNOWN"
       },
       "tier-math": {
         "pass": false,
-        "latency_s": 4.2,
+        "latency_s": 4.1,
         "tokens": 270,
         "reply_head": "To determine the number of add-ons needed to cover 460 serves with the given conditions, follow these steps:\n\n1. **Base "
+      }
+    },
+    "nemotron-3-super": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.2,
+        "tokens": 73,
+        "reply_head": "Nightly strip-cleaning of commercial slushy machines prevents syrup from thickening and blocking the tap or overloading "
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 47,
+        "reply_head": "```python\nimport re\n\ndef is_palindrome(s):\n    cleaned = re.sub(r'[^a-zA-Z0-9]', '', s).lower()\n    return cleaned == cl"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 0.7,
+        "tokens": 3,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 3,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": false,
+        "latency_s": 3.0,
+        "tokens": 7,
+        "reply_head": "1\n\nAnswer: 1"
+      }
+    },
+    "minimax-m2.7": {
+      "extract": {
+        "pass": true,
+        "latency_s": 3.5,
+        "tokens": 162,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": false,
+        "latency_s": 6.7,
+        "tokens": 300,
+        "reply_head": ""
+      },
+      "code": {
+        "pass": false,
+        "latency_s": 7.0,
+        "tokens": 300,
+        "reply_head": ""
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 2.4,
+        "tokens": 92,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 5.3,
+        "tokens": 259,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 6.3,
+        "tokens": 260,
+        "reply_head": "2"
+      }
+    },
+    "minimax-m3": {
+      "extract": {
+        "pass": true,
+        "latency_s": 2.2,
+        "tokens": 64,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 3.4,
+        "tokens": 169,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean because leftover syrup thickens overnight, blocking taps and st"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 3.2,
+        "tokens": 195,
+        "reply_head": "```python\nimport re\n\ndef is_palindrome(s):\n    cleaned = re.sub(r'[^a-zA-Z0-9]', '', s).lower()\n    return cleaned == cl"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.5,
+        "tokens": 26,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 1.4,
+        "tokens": 49,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 2.4,
+        "tokens": 128,
+        "reply_head": "2"
+      }
+    },
+    "kimi-k2.6": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.9,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.6,
+        "tokens": 66,
+        "reply_head": "Commercial slushy machines require nightly strip-cleaning to prevent syrup thickening that blocks taps and strains auger"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 39,
+        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(c.lower() for c in s if c.isalnum())\n    return cleaned == cleaned"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 3,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 2,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": false,
+        "latency_s": 0.9,
+        "tokens": 2,
+        "reply_head": "3"
+      }
+    },
+    "minimax-m2.5": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.7,
+        "tokens": 110,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 4.5,
+        "tokens": 247,
+        "reply_head": "Commercial slushy machines require nightly strip-cleaning during trading periods as overnight syrup thickens, blocks tap"
+      },
+      "code": {
+        "pass": false,
+        "latency_s": 6.1,
+        "tokens": 300,
+        "reply_head": "def is_palindrome(s):\n    # Keep only alphanumeric characters and compare case\u2011insensitively\n    filtered = ''.join(ch.l"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 2.4,
+        "tokens": 101,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 47.6,
+        "tokens": 265,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": false,
+        "latency_s": 5.0,
+        "tokens": 300,
+        "reply_head": ""
+      }
+    },
+    "gemma4:31b": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 16,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 46,
+        "reply_head": "Nightly strip-cleaning prevents syrup buildup from blocking taps and damaging auger motors, while weekly seal cleaning s"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 56,
+        "reply_head": "```python\nimport re\n\ndef is_palindrome(s):\n    clean_s = re.sub(r'[^a-zA-Z0-9]', '', s).lower()\n    return clean_s == cl"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 0.5,
+        "tokens": 2,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.6,
+        "tokens": 2,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 0.6,
+        "tokens": 2,
+        "reply_head": "2"
+      }
+    },
+    "kimi-k2.5": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 12,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 54,
+        "reply_head": "Commercial slushy machines require nightly strip-cleans to prevent syrup thickening and motor strain, plus weekly deep-c"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.2,
+        "tokens": 38,
+        "reply_head": "```python\ndef is_palindrome(s):\n    filtered = ''.join(c.lower() for c in s if c.isalnum())\n    return filtered == filte"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 2,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 1,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 1,
+        "reply_head": "2"
+      }
+    },
+    "nemotron-3-ultra": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 58,
+        "reply_head": "Commercial slushy machines require nightly cleaning to prevent syrup residue from causing motor failure, the leading cau"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 13.0,
+        "tokens": 41,
+        "reply_head": "```python\ndef is_palindrome(s):\n    filtered = ''.join(c.lower() for c in s if c.isalnum())\n    return filtered == filte"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 3,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 3,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 1.8,
+        "tokens": 2,
+        "reply_head": "2"
+      }
+    },
+    "glm-5.1": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 12,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.4,
+        "tokens": 74,
+        "reply_head": "To prevent syrup from thickening and damaging the tap or auger motor, commercial slushy machines require a nightly strip"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.2,
+        "tokens": 41,
+        "reply_head": "```python\nimport re\n\ndef is_palindrome(s):\n    s = re.sub(r'[^a-zA-Z0-9]', '', s).lower()\n    return s == s[::-1]\n```"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 1,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 1.4,
+        "tokens": 1,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": false,
+        "latency_s": 1.0,
+        "tokens": 1,
+        "reply_head": "3"
+      }
+    },
+    "deepseek-v4-flash": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 0.9,
+        "tokens": 55,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean to prevent syrup from thickening and blocking the tap, which is"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 6.7,
+        "tokens": 38,
+        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(c.lower() for c in s if c.isalnum())\n    return cleaned == cleaned"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 2.9,
+        "tokens": 2,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.7,
+        "tokens": 3,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": false,
+        "latency_s": 6.2,
+        "tokens": 53,
+        "reply_head": "460 - 240 = 220 serves needed beyond the base.  \nEach add-on is 120 serves, so 220 / 120 = 1.833..., which means 2 add-o"
+      }
+    },
+    "gpt-oss:20b": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.6,
+        "tokens": 109,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 2.7,
+        "tokens": 300,
+        "reply_head": "Commercial slushy machines must be strip\u2011cleaned nightly during trading periods because overnight syrup thickens, clogs "
+      },
+      "code": {
+        "pass": false,
+        "latency_s": 2.9,
+        "tokens": 300,
+        "reply_head": ""
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 51,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 2.1,
+        "tokens": 210,
+        "reply_head": "UNKNOWN"
+      },
+      "tier-math": {
+        "pass": true,
+        "latency_s": 1.6,
+        "tokens": 122,
+        "reply_head": "2"
       }
     }
   }
