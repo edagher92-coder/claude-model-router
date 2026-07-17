@@ -385,7 +385,8 @@ def _write_report(dir_, date, models):
 
 def _probe_row(passes, latency=1.0, **extra):
     row = {p: {"pass": True, "latency_s": latency} for p in
-           ("extract", "summarise", "code", "reason", "price-honesty", "tier-math")}
+           ("extract", "summarise", "code", "reason", "price-honesty",
+            "tier-math", "deep-reason")}
     for p in passes if isinstance(passes, list) else []:
         row[p]["pass"] = False
     row.update(extra)
@@ -407,6 +408,34 @@ def test_allocation_picks_fastest_clean_sweep(monkeypatch, tmp_path):
     alloc = router.bench_allocation()
     assert alloc["model"] == "kimi-k2.7-code"
     assert router._model_id("glm") == "kimi-k2.7-code"
+
+
+def test_allocation_deep_reason_gate_excludes_shallow_model(monkeypatch, tmp_path):
+    # A model that clean-sweeps the easy probes but FAILS deep-reason must not
+    # win the heavy tier, even if it is the fastest -> the quality gate holds.
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    _write_report(reports, "2026-07-17", {
+        "fast-but-shallow": _probe_row(["deep-reason"], latency=0.3),  # fastest, fails deep-reason
+        "slower-but-capable": _probe_row([], latency=1.2),             # full sweep -> winner
+    })
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+    assert router.bench_allocation()["model"] == "slower-but-capable"
+
+
+def test_allocation_tie_break_is_deterministic(monkeypatch, tmp_path):
+    # Two clean-sweep models at identical latency: the winner must be stable
+    # (alphabetical) regardless of report insertion order, so every machine
+    # that pulls the same report allocates the SAME model.
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    for order in (("zeta-model", "alpha-model"), ("alpha-model", "zeta-model")):
+        models = {name: _probe_row([], latency=1.0) for name in order}
+        _write_report(reports, "2026-07-17", models)
+        monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+        assert router.bench_allocation()["model"] == "alpha-model"
 
 
 def test_allocation_precedence_and_disable(monkeypatch, tmp_path):

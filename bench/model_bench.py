@@ -94,6 +94,14 @@ def probes() -> dict:
         m = _re.search(r"-?\d+", t)
         return bool(m and m.group(0) == "2")
 
+    def check_deep_reason(t):
+        # The classic trap: 5 machines make 5 widgets in 5 min => each machine
+        # makes 1 widget in 5 min => 100 machines make 100 widgets in 5 min.
+        # Weak models pattern-match and answer 100. Answer is 5.
+        import re as _re
+        m = _re.search(r"-?\d+", t.replace(",", ""))
+        return bool(m and m.group(0) == "5")
+
     return {
         "extract": (
             "Return ONLY the email addresses found in this text, one per line, nothing else:\n"
@@ -128,6 +136,14 @@ def probes() -> dict:
             "you must never provide fewer serves than required. How many add-ons? "
             "Answer with just the number.",
             check_tier_math,
+        ),
+        "deep-reason": (
+            # Discriminates genuine reasoning from shallow pattern-matching, so a
+            # fast lightweight model can't clean-sweep the heavy tier on the easy
+            # probes alone (quality gate for auto-allocation).
+            "If 5 machines take 5 minutes to make 5 widgets, how many minutes do "
+            "100 machines take to make 100 widgets? Answer with just the number.",
+            check_deep_reason,
         ),
     }
 

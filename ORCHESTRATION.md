@@ -55,18 +55,23 @@ Two ways to run it:
 ## Choosing the worker (strong suits)
 
 Weekly evidence beats vibes: `bench/model_bench.py` probes the live fleet on
-extract / summarise / code / reasoning / **price-honesty** and writes a dated
-report to `bench/reports/`. Route by the latest report, not by memory —
-particularly the price-honesty column, which decides whether a model can be
-trusted anywhere near customer-facing drafting (even non-stakes).
+extract / summarise / code / reasoning / **price-honesty** / **tier-math** /
+**deep-reason** and writes a dated report to `bench/reports/`. Route by the
+latest report, not by memory — particularly the price-honesty column, which
+decides whether a model can be trusted anywhere near customer-facing drafting
+(even non-stakes). The **deep-reason** probe (a "5 machines / 5 widgets /
+5 minutes → 5" reasoning trap) is a quality gate: it stops a fast but shallow
+model from clean-sweeping the heavy tier on the easy probes alone.
 
 **Auto-allocation (added 2026-07-17):** the router picks the glm tier's model
-itself from the latest committed report — clean sweep on all probes (including
-the two business-critical ones: price-honesty and tier-math), lowest average
-latency wins. Weekly loop: Monday's bench commits a fresh report → every
-machine that pulls re-allocates automatically. Env overrides
-(`CLAUDE_ROUTER_GLM_MODEL` > `GLM_OLLAMA_TAG`) always win; disable with
-`CLAUDE_ROUTER_AUTO_ALLOCATE=0`; `--doctor` shows the active allocation and why.
+itself from the latest committed report — clean sweep on **all** probes
+(including the three business/quality-critical ones: price-honesty, tier-math,
+deep-reason), lowest average latency wins, **ties broken deterministically by
+model name** so every machine that pulls the same report allocates the same
+model. Weekly loop: Monday's bench commits a fresh report → every machine that
+pulls re-allocates automatically. Env overrides (`CLAUDE_ROUTER_GLM_MODEL` >
+`GLM_OLLAMA_TAG`) always win; disable with `CLAUDE_ROUTER_AUTO_ALLOCATE=0`;
+`--doctor` shows the active allocation and why.
 
 Baseline mapping (see the latest report for current truth):
 
