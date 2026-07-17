@@ -944,7 +944,7 @@ def bench_allocation() -> Optional[dict]:
     except (ValueError, OSError):
         return None
 
-    best: Optional[dict] = None
+    qualifiers: list = []
     for model, row in (report.get("models") or {}).items():
         if not isinstance(row, dict) or row.get("baseline"):
             continue  # Claude baseline rows are comparison points, not allocatable
@@ -955,10 +955,16 @@ def bench_allocation() -> Optional[dict]:
             continue
         lats = [v["latency_s"] for v in probes.values() if "latency_s" in v]
         avg = sum(lats) / len(lats) if lats else float("inf")
-        if best is None or avg < best["avg_latency_s"]:
-            best = {"model": model, "date": report.get("date", latest.stem),
-                    "avg_latency_s": round(avg, 2)}
-    return best
+        qualifiers.append((round(avg, 2), model))
+    if not qualifiers:
+        return None
+    # Deterministic pick: lowest rounded avg latency, ties broken alphabetically
+    # by model name. Rounding both sides + a stable secondary key means every
+    # machine that pulls the same report allocates the SAME model, and a near-tie
+    # doesn't flip the winner on sub-100ms latency noise or report ordering.
+    avg, model = min(qualifiers)
+    return {"model": model, "date": report.get("date", latest.stem),
+            "avg_latency_s": avg}
 
 
 def _model_id(tier: str) -> str:
