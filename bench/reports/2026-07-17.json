@@ -65,6 +65,102 @@
         "tokens": 6,
         "reply_head": "UNKNOWN"
       }
+    },
+    "gpt-oss:120b": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.8,
+        "tokens": 88,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 3.0,
+        "tokens": 159,
+        "reply_head": "Nightly strip\u2011cleaning of commercial slushy machines prevents syrup residue from thickening, blocking the tap and over\u2011s"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.8,
+        "tokens": 141,
+        "reply_head": "```python\ndef is_palindrome(s):\n    filtered = ''.join(ch.lower() for ch in s if ch.isalnum())\n    return filtered == fi"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 36,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 1.9,
+        "tokens": 135,
+        "reply_head": "UNKNOWN"
+      }
+    },
+    "kimi-k2.7-code": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.4,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.5,
+        "tokens": 57,
+        "reply_head": "Slushy machines require nightly strip-cleaning to prevent syrup thickening, which blocks taps and damages auger motors\u2014t"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 39,
+        "reply_head": "```python\ndef is_palindrome(s):\n    s = ''.join(c for c in s if c.isalnum()).lower()\n    return s == s[::-1]\n```"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 3,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 3.2,
+        "tokens": 2,
+        "reply_head": "UNKNOWN"
+      }
+    },
+    "nemotron-3-nano:30b": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.9,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.7,
+        "tokens": 90,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean during trading hours to prevent syrup residue from thickening o"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.1,
+        "tokens": 37,
+        "reply_head": "def is_palindrome(s):\n    filtered = ''.join(c for c in s.lower() if c.isalnum())\n    return filtered == filtered[::-1]"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 3,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 3,
+        "reply_head": "UNKNOWN"
+      }
     }
   }
 }
