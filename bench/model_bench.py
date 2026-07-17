@@ -159,7 +159,18 @@ def main() -> int:
 
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{today}.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+    # Same-day reruns MERGE per-model (fresh rows win) instead of clobbering
+    # the whole report — a partial re-test must not erase the full table.
+    json_path = out_dir / f"{today}.json"
+    if json_path.exists():
+        try:
+            prior = json.loads(json_path.read_text(encoding="utf-8"))
+            merged = prior.get("models", {})
+            merged.update(results["models"])
+            results["models"] = merged
+        except (ValueError, OSError):
+            pass  # unreadable prior report: overwrite it
+    json_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     lines = [f"# Model bench — {today}", "", f"Base: `{base}` · max_tokens={MAX_TOKENS}", "",
              "| model | " + " | ".join(probes()) + " | avg latency |", "|---|" + "---|" * (len(probes()) + 1)]
