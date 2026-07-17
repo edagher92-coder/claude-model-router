@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import urllib.parse
 from typing import Callable, Optional
 
@@ -43,11 +44,33 @@ def validate_webhook_url(url: str, allow_hosts: Optional[set] = None) -> tuple[b
         return False, f"webhook host '{host}' not in CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS"
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_loopback or ip.is_private or ip.is_link_local:
+        if _ip_is_internal(ip):
             return False, "internal/metadata IP not allowed as a webhook target (SSRF)"
+        return True, "ok"
     except ValueError:
-        pass  # a hostname, already allowlisted above
+        pass  # a hostname — must resolve it (DNS-rebinding guard, Kimi 4th-pass)
+    # An allowlisted HOSTNAME can still resolve to an internal IP (attacker DNS /
+    # rebinding -> cloud metadata). Reject if ANY resolution is internal.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        return False, f"webhook host '{host}' does not resolve: {exc}"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if _ip_is_internal(ip):
+            return False, f"webhook host '{host}' resolves to internal IP {ip} (SSRF)"
     return True, "ok"
+
+
+def _ip_is_internal(ip) -> bool:
+    """Internal/unsafe for an OUTBOUND webhook: loopback, private, link-local
+    (169.254 metadata — is_private also covers it, so ordering is moot here but
+    explicit for clarity), multicast, or reserved."""
+    return (ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
 
 
 def sign_payload(body: bytes, secret: str) -> str:

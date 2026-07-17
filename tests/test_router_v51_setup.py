@@ -340,6 +340,7 @@ def test_ollama_caller_reads_env_at_call_time(monkeypatch, tmp_path):
         return _resp({"message": {"content": json.dumps(envelope)},
                       "prompt_eval_count": 1, "eval_count": 2})
 
+    monkeypatch.setattr(ollama_caller, "_dispatch_ssrf_ok", lambda base: None)
     monkeypatch.setattr(ollama_caller.urllib.request, "urlopen", fake_urlopen)
     result = ollama_caller.call("glm-5.2", "system", "message",
                                 {"input_schema": {"type": "object"}})
@@ -367,6 +368,7 @@ def test_ollama_caller_chain_falls_back_to_cloud(monkeypatch, tmp_path):
         assert dict(request.header_items()).get("Authorization") == "Bearer ok-123"
         return _resp({"message": {"content": json.dumps(envelope)}})
 
+    monkeypatch.setattr(ollama_caller, "_dispatch_ssrf_ok", lambda base: None)
     monkeypatch.setattr(ollama_caller.urllib.request, "urlopen", fake_urlopen)
     result = ollama_caller.call("glm-5.2", "s", "m", {"input_schema": {"type": "object"}})
     assert result["status"] == "completed"
