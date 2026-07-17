@@ -4,6 +4,7 @@ import os
 
 def load_router(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "0")
     import router
 
     return importlib.reload(router)

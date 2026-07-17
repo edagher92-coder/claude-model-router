@@ -19,6 +19,9 @@ def load_router(monkeypatch, tmp_path, *, anthropic_key=None, ollama_url=None,
                 "CLAUDE_ROUTER_OLLAMA_URL", "OLLAMA_API_KEY",
                 "GLM_OLLAMA_TAG", "CLAUDE_ROUTER_GLM_MODEL"):
         monkeypatch.delenv(var, raising=False)
+    # Isolate tests from the repo's real committed bench reports — allocation
+    # tests opt back in explicitly with CLAUDE_ROUTER_AUTO_ALLOCATE=1.
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "0")
     if anthropic_key:
         monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_key)
     if ollama_url:
@@ -356,3 +359,66 @@ def test_ollama_caller_chain_falls_back_to_cloud(monkeypatch, tmp_path):
     result = ollama_caller.call("glm-5.2", "s", "m", {"input_schema": {"type": "object"}})
     assert result["status"] == "completed"
     assert calls == ["http://dead:11434/api/chat", "https://ollama.com/api/chat"]
+
+
+# --------------------------------------------------------------------------- #
+# Bench auto-allocation (added 2026-07-17)
+# --------------------------------------------------------------------------- #
+def _write_report(dir_, date, models):
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / f"{date}.json").write_text(json.dumps({"date": date, "models": models}))
+
+
+def _probe_row(passes, latency=1.0, **extra):
+    row = {p: {"pass": True, "latency_s": latency} for p in
+           ("extract", "summarise", "code", "reason", "price-honesty", "tier-math")}
+    for p in passes if isinstance(passes, list) else []:
+        row[p]["pass"] = False
+    row.update(extra)
+    return row
+
+
+def test_allocation_picks_fastest_clean_sweep(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    _write_report(reports, "2026-07-17", {
+        "glm-5.2": _probe_row([], latency=1.7),
+        "kimi-k2.7-code": _probe_row([], latency=1.4),          # fastest sweep -> winner
+        "nemotron-3-nano:30b": _probe_row(["tier-math"], 0.9),  # fails critical probe
+        "claude-sonnet-5": _probe_row([], latency=0.5, baseline=True),  # never allocatable
+    })
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+
+    alloc = router.bench_allocation()
+    assert alloc["model"] == "kimi-k2.7-code"
+    assert router._model_id("glm") == "kimi-k2.7-code"
+
+
+def test_allocation_precedence_and_disable(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    reports = tmp_path / "reports"
+    _write_report(reports, "2026-07-17", {"glm-5.2": _probe_row([], 1.0)})
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    monkeypatch.setenv("GLM_OLLAMA_TAG", "pinned-tag")          # env beats bench
+    assert router._model_id("glm") == "pinned-tag"
+    monkeypatch.delenv("GLM_OLLAMA_TAG")
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "0")      # kill switch
+    assert router.bench_allocation() is None
+    assert router._model_id("glm") == "glm-5.2:cloud"           # registry default
+
+
+def test_allocation_none_without_report_or_qualifier(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", tmp_path / "empty")
+    assert router.bench_allocation() is None
+    reports = tmp_path / "reports"
+    # Report exists but its only model misses a critical probe entirely.
+    row = {p: {"pass": True, "latency_s": 1.0} for p in ("extract", "reason")}
+    _write_report(reports, "2026-07-17", {"some-model": row})
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+    assert router.bench_allocation() is None
+    assert router._model_id("glm") == "glm-5.2:cloud"

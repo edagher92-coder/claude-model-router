@@ -444,6 +444,17 @@ def doctor() -> dict:
     bridge_ready = bridge_base is not None
 
     glm_tag = _model_id("glm")
+    if os.getenv("CLAUDE_ROUTER_GLM_MODEL", "").strip() or os.getenv("GLM_OLLAMA_TAG", "").strip():
+        alloc_detail = f"'{glm_tag}' pinned by env override"
+    else:
+        allocated = bench_allocation()
+        if allocated:
+            alloc_detail = (f"'{glm_tag}' auto-allocated from bench {allocated['date']} "
+                            f"(clean sweep, avg {allocated['avg_latency_s']}s)")
+        else:
+            alloc_detail = f"'{glm_tag}' registry default (no bench report / auto-allocate off)"
+    rows.append({"check": "glm allocation", "ok": True, "detail": alloc_detail, "fix": ""})
+
     if bridge_ready:
         listed = _tag_listed(bridge_base or "", bridge_key, glm_tag)
         detail = f"'{glm_tag}' listed on {bridge_base}" if listed else (
@@ -628,9 +639,54 @@ def _tier_enabled(tier: str) -> bool:
     return True
 
 
+BENCH_REPORTS_DIR = pathlib.Path(__file__).parent / "bench" / "reports"
+# A bench winner must pass EVERY probe it ran, and these two must be present —
+# they encode the business rules (never invent a price; round tiers UP).
+CRITICAL_PROBES = {"price-honesty", "tier-math"}
+
+
+def bench_allocation() -> Optional[dict]:
+    """Auto-allocation from the latest committed bench report: among bridge
+    models with a clean sweep (all probes PASS, critical probes present),
+    pick the lowest average latency. Returns {"model", "date", "avg_latency_s"}
+    or None (no report / no qualifier / disabled).
+
+    Weekly loop: model-bench.yml commits a fresh report Mondays -> any machine
+    that pulls gets the new allocation automatically. Disable with
+    CLAUDE_ROUTER_AUTO_ALLOCATE=0. Explicit env overrides always win.
+    """
+    if os.getenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1").strip().lower() in {"0", "false", "off"}:
+        return None
+    try:
+        latest = max(BENCH_REPORTS_DIR.glob("*.json"))
+    except (ValueError, OSError):
+        return None
+    try:
+        report = json.loads(latest.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+
+    best: Optional[dict] = None
+    for model, row in (report.get("models") or {}).items():
+        if not isinstance(row, dict) or row.get("baseline"):
+            continue  # Claude baseline rows are comparison points, not allocatable
+        probes = {k: v for k, v in row.items() if isinstance(v, dict) and "pass" in v}
+        if not probes or not CRITICAL_PROBES.issubset(probes):
+            continue
+        if not all(v.get("pass") for v in probes.values()):
+            continue
+        lats = [v["latency_s"] for v in probes.values() if "latency_s" in v]
+        avg = sum(lats) / len(lats) if lats else float("inf")
+        if best is None or avg < best["avg_latency_s"]:
+            best = {"model": model, "date": report.get("date", latest.stem),
+                    "avg_latency_s": round(avg, 2)}
+    return best
+
+
 def _model_id(tier: str) -> str:
     """Resolve a tier's model id: CLAUDE_ROUTER_<TIER>_MODEL wins, then (for
-    glm) the account-wide GLM_OLLAMA_TAG convention, then the registry."""
+    glm) GLM_OLLAMA_TAG, then the latest bench report's clean-sweep winner
+    (auto-allocation), then the registry default."""
     explicit = os.getenv(f"CLAUDE_ROUTER_{tier.upper()}_MODEL", "").strip()
     if explicit:
         return explicit
@@ -638,6 +694,9 @@ def _model_id(tier: str) -> str:
         tag = os.getenv("GLM_OLLAMA_TAG", "").strip()
         if tag:
             return tag
+        allocated = bench_allocation()
+        if allocated:
+            return allocated["model"]
     return MODEL_REGISTRY[tier].api_id
 
 
