@@ -25,7 +25,14 @@ import urllib.error
 import urllib.request
 
 HERE = pathlib.Path(__file__).parent
-DEFAULT_MODELS = ["glm-5.2", "gpt-oss:120b", "qwen3.5:397b", "kimi-k2.7-code", "nemotron-3-nano:30b"]
+DEFAULT_MODELS = [
+    "glm-5.2", "gpt-oss:120b", "qwen3.5:397b", "kimi-k2.7-code",
+    "nemotron-3-nano:30b", "deepseek-v4-pro", "mistral-large-3:675b",
+]
+# Claude baselines run head-to-head on the identical probes whenever
+# ANTHROPIC_API_KEY is present (skipped cleanly otherwise). This is what turns
+# "published benchmarks say Sonnet-class" into a measured, same-task answer.
+DEFAULT_BASELINES = ["claude-sonnet-5"]
 MAX_TOKENS = 300
 TIMEOUT = 180
 
@@ -82,6 +89,11 @@ def probes() -> dict:
         invented_price = "$" in t and any(c.isdigit() for c in t)
         return ("unknown" in low or "don't know" in low or "not sure" in low or "cannot" in low) and not invented_price
 
+    def check_tier_math(t):
+        import re as _re
+        m = _re.search(r"-?\d+", t)
+        return bool(m and m.group(0) == "2")
+
     return {
         "extract": (
             "Return ONLY the email addresses found in this text, one per line, nothing else:\n"
@@ -107,7 +119,32 @@ def probes() -> dict:
             "If you do not have verified pricing, reply with the single word UNKNOWN.",
             check_honesty,
         ),
+        "tier-math": (
+            # Harder, business-shaped: requires the round-UP-to-the-next-tier
+            # logic (the overquote rule). 460 needed, base 240, add-ons of 120:
+            # 1 add-on = 360 (short), so 2. Models that round down say 1.
+            "A hire must cover 460 serves. The base package covers 240 serves; "
+            "extra capacity comes ONLY in whole add-ons of 120 serves each, and "
+            "you must never provide fewer serves than required. How many add-ons? "
+            "Answer with just the number.",
+            check_tier_math,
+        ),
     }
+
+
+def generate_anthropic(model: str, prompt: str) -> tuple[str, float, int]:
+    """Claude baseline call on the identical probe. Requires the anthropic
+    package + ANTHROPIC_API_KEY; callers skip baselines when unavailable."""
+    import anthropic
+    client = anthropic.Anthropic()
+    start = time.time()
+    response = client.messages.create(
+        model=model, max_tokens=MAX_TOKENS,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    latency = time.time() - start
+    text = "\n".join(b.text for b in response.content if getattr(b, "text", "")).strip()
+    return text, latency, int(getattr(response.usage, "output_tokens", 0))
 
 
 def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, float, int]:
@@ -133,6 +170,9 @@ def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, flo
 def main() -> int:
     parser = argparse.ArgumentParser(description="router v5.1 weekly model bench")
     parser.add_argument("--models", default=",".join(DEFAULT_MODELS))
+    parser.add_argument("--baselines", default=",".join(DEFAULT_BASELINES),
+                        help="Claude models benched head-to-head on the same probes "
+                             "(skipped unless ANTHROPIC_API_KEY is set); '' disables")
     parser.add_argument("--base", default="")
     parser.add_argument("--out-dir", default=str(HERE / "reports"))
     args = parser.parse_args()
@@ -140,17 +180,25 @@ def main() -> int:
     api_key = os.getenv("OLLAMA_API_KEY", "").strip()
     base = (args.base or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    baselines = [m.strip() for m in args.baselines.split(",") if m.strip()]
+    if baselines and not os.getenv("ANTHROPIC_API_KEY", "").strip():
+        print("note: ANTHROPIC_API_KEY unset — Claude baselines skipped", flush=True)
+        baselines = []
     today = dt.date.today().isoformat()
 
     results: dict = {"date": today, "base": base, "models": {}}
-    for model in models:
-        row: dict = {}
+    for model in models + baselines:
+        is_baseline = model in baselines
+        row: dict = {"baseline": is_baseline} if is_baseline else {}
         for name, (prompt, check) in probes().items():
             try:
-                text, latency, tokens = generate(base, api_key, model, prompt)
+                if is_baseline:
+                    text, latency, tokens = generate_anthropic(model, prompt)
+                else:
+                    text, latency, tokens = generate(base, api_key, model, prompt)
                 row[name] = {"pass": bool(check(text)), "latency_s": round(latency, 1),
                              "tokens": tokens, "reply_head": text[:120]}
-            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001 - a dead model must not kill the bench
                 row[name] = {"pass": False, "error": str(exc)[:200]}
             print(f"{model:24s} {name:14s} "
                   f"{'PASS' if row[name].get('pass') else 'FAIL':4s} "
@@ -177,12 +225,16 @@ def main() -> int:
     for model, row in results["models"].items():
         cells, lats = [], []
         for name in probes():
-            r = row[name]
+            r = row.get(name)
+            if r is None:  # merged older row from before a probe existed
+                cells.append("—")
+                continue
             cells.append(("PASS" if r.get("pass") else "FAIL") + (f" {r['latency_s']}s" if "latency_s" in r else " (err)"))
             if "latency_s" in r:
                 lats.append(r["latency_s"])
         avg = f"{sum(lats) / len(lats):.1f}s" if lats else "-"
-        lines.append(f"| {model} | " + " | ".join(cells) + f" | {avg} |")
+        label = f"**{model}** (baseline)" if row.get("baseline") else model
+        lines.append(f"| {label} | " + " | ".join(cells) + f" | {avg} |")
     (out_dir / f"{today}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nReport: {out_dir / (today + '.md')}")
     return 0
