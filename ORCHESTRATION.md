@@ -96,3 +96,30 @@ Measured caveats from the 2026-07-17 run (re-check weekly):
   cloud models (`/api/tags` — the bench lists what it saw).
 - After any Anthropic model lineup change, update `MODEL_REGISTRY` in
   `router.py` and this table together.
+
+## Planned fleet upgrade — Kimi K3 Max (expected 2026-07-27)
+
+Kimi K3 Max is expected on Ollama Cloud around **27 July 2026**. Elie flags it as
+a likely game-changer worth adopting fast — potentially as a NON-STAKES
+sub-manager working *alongside* Fable in the two-tier chain. Integration
+checklist for that day:
+
+1. **Confirm the real tag:** `python .claude/tools/ollama_route.py --list`
+   (`kimi-k3-max` / `kimi-k3-max:cloud` / other — do NOT guess-commit a tag).
+2. **Bench it:** add the tag to `bench/model_bench.py` `DEFAULT_MODELS`, run
+   `python bench/model_bench.py` (with a `claude-sonnet-5` baseline when a key is
+   present — head-to-head on identical probes).
+3. **Auto-allocation is automatic:** if K3 Max clean-sweeps fastest (every probe
+   PASS, incl. the business-critical `price-honesty` + `tier-math`), the `glm`
+   tier auto-allocates to it — no router change. Verify with `router.py --doctor`
+   (the `glm allocation` row shows the winner + why).
+4. **Co-orchestrator evaluation:** a strong open model can hold the two-tier
+   "manage" role for NON-STAKES fan-out, saving Claude quota. If adopting it as a
+   sub-manager/worker tier, add it to `hq_orchestrator/core.py` `WORKER_MODELS`.
+   **Guardrail unchanged:** stakes work (money/price/quote/invoice/legal/
+   customer-facing) NEVER routes to the bridge — `validate_task_envelope` already
+   rejects `stakes` + a bridge model, so a K3-Max sub-manager structurally cannot
+   leak stakes work. Fable stays the top orchestrator; K3 Max slots in below it.
+5. **Self-review loop:** have K3 Max review the router, then Opus/Fable
+   adjudicate each finding (confirm real, reject overcalls) before shipping —
+   the same loop that hardened the router across four passes.
