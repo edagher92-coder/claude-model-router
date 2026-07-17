@@ -6,10 +6,57 @@ API caller and MCP wiring live in server.py.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import json
+import os
 import pathlib
 import re
+import urllib.parse
 from typing import Callable, Optional
+
+
+# --------------------------------------------------------------------------- #
+# Outbound-webhook SSRF guard for server.route_to_automation. A webhook POSTs
+# artifact content OUT, so the risk is (a) sending it to an attacker host and
+# (b) pivoting into internal services / cloud metadata. Policy: https only, host
+# must be EXPLICITLY allowlisted (CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS), and never
+# an internal IP literal. Optional HMAC lets the receiver verify authenticity.
+# --------------------------------------------------------------------------- #
+def validate_webhook_url(url: str, allow_hosts: Optional[set] = None) -> tuple[bool, str]:
+    allow = allow_hosts if allow_hosts is not None else {
+        h.strip().lower() for h in os.environ.get("CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS", "").split(",") if h.strip()
+    }
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError as exc:
+        return False, f"unparseable webhook URL: {exc}"
+    if parsed.scheme != "https":
+        return False, "webhook must be https"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False, "no host in webhook URL"
+    if not allow:
+        return False, "no webhook hosts allowlisted (set CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS)"
+    if host not in allow:
+        return False, f"webhook host '{host}' not in CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS"
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            return False, "internal/metadata IP not allowed as a webhook target (SSRF)"
+    except ValueError:
+        pass  # a hostname, already allowlisted above
+    return True, "ok"
+
+
+def sign_payload(body: bytes, secret: str) -> str:
+    """HMAC-SHA256 signature header value so the receiver can verify the POST
+    came from us. Empty secret -> '' (unsigned)."""
+    if not secret:
+        return ""
+    return "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
 
 ENVELOPE_VERSION = "1.0"
 TASK_ID_RE = re.compile(r"^T[0-9]{3}$")
@@ -38,7 +85,8 @@ _STAKES_HINT_RE = re.compile(
 )
 
 # Appended to a sub-manager's system prompt when role == "orchestrator": it may
-# either do the task or decompose it into child envelopes routed cheapest-first.
+# either do the task or decompose it into child envelopes, each ROUTED to the
+# cheapest capable model (routing is cheapest-first; execution is in emit order).
 ORCHESTRATOR_NOTE = (
     "\n\n--- ORCHESTRATOR MODE ---\n"
     "You are a sub-manager in a two-tier delegation chain (Fable leads, you "
@@ -137,7 +185,7 @@ SUBMIT_RESULT_TOOL = {
             "usage_note": {"type": "string"},
             # Two-tier delegation: a sub-manager (role=orchestrator) may return
             # child task envelopes instead of doing the work itself. The
-            # orchestrator executes each one cheapest-first, depth-limited.
+            # orchestrator executes each in emit (dependency) order, depth-limited.
             "subtasks": {
                 "type": "array",
                 "items": {
@@ -420,7 +468,9 @@ def orchestrate(
 ) -> dict:
     """Two-tier delegation. Run `env` on its assigned worker; if that worker is
     a SUB-MANAGER (role='orchestrator') that completed with `subtasks`, execute
-    each child cheapest-first (recursively, depth-limited) and attach the child
+    each child in the order the sub-manager emitted them (dependency order -- a
+    child may consume an earlier sibling's artifact, so they are NOT reordered;
+    'cheapest-first' is the per-task model ROUTING, not the run order) and attach the child
     results under `subtask_results`.
 
     The chain: Fable (the calling session) builds the top envelope, usually
