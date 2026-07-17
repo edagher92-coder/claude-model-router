@@ -14,6 +14,38 @@ from typing import Callable, Optional
 ENVELOPE_VERSION = "1.0"
 TASK_ID_RE = re.compile(r"^T[0-9]{3}$")
 
+# Two-tier delegation depth cap. Fable (the session) dispatches the top task to
+# an Opus sub-manager at depth 0; the sub-manager may return child subtasks that
+# run at depth 1; those may sub-delegate once more at depth 2, then it stops.
+# This is a hard runaway backstop, NOT a target — most work is one or two tiers.
+MAX_ORCHESTRATION_DEPTH = 2
+
+ENVELOPE_ROLES = {"worker", "orchestrator"}
+
+# Money-ish objective wording that must never reach the Ollama bridge even when
+# the envelope forgot stakes:true (NUMBERS RULE keyword backstop).
+_STAKES_HINT_RE = re.compile(
+    r"(?i)\b(price|pricing|quote|quoting|invoice|refund|deposit|payment|charge|GST|legal|contract)\b|\$"
+)
+
+# Appended to a sub-manager's system prompt when role == "orchestrator": it may
+# either do the task or decompose it into child envelopes routed cheapest-first.
+ORCHESTRATOR_NOTE = (
+    "\n\n--- ORCHESTRATOR MODE ---\n"
+    "You are a sub-manager in a two-tier delegation chain (Fable leads, you "
+    "manage, workers execute). If this task is large, DECOMPOSE it instead of "
+    "doing it all yourself: return status 'completed' with a 'subtasks' array of "
+    "child task envelopes, each with task_id (T010, T011, ...), objective, "
+    "assigned_model, task_type, acceptance_checks, and stakes. Route every child "
+    "to the CHEAPEST capable model: glm-5.2 for heavy NON-stakes bulk "
+    "(drafting/summarising/analysis), claude-sonnet-5 for normal work, "
+    "claude-haiku-4-5 for mechanical transforms, claude-opus-4-8 only for the "
+    "hardest pieces. NEVER route a stakes task (money, price, quote, invoice, "
+    "legal, customer-facing) to glm-5.2 — mark it stakes:true and keep it on a "
+    "Claude tier. If the task is small enough to finish directly, just do it and "
+    "omit subtasks."
+)
+
 WORKER_MODELS = {
     # envelope value -> API model id (kept in step with router.py's registry)
     "claude-opus-4-8": "claude-opus-4-8",
@@ -92,6 +124,29 @@ SUBMIT_RESULT_TOOL = {
             },
             "blocking_questions": {"type": "array"},
             "usage_note": {"type": "string"},
+            # Two-tier delegation: a sub-manager (role=orchestrator) may return
+            # child task envelopes instead of doing the work itself. The
+            # orchestrator executes each one cheapest-first, depth-limited.
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["task_id", "objective", "assigned_model", "task_type", "acceptance_checks"],
+                    "properties": {
+                        "task_id": {"type": "string", "pattern": TASK_ID_RE.pattern},
+                        "objective": {"type": "string"},
+                        "assigned_model": {"enum": sorted(WORKER_MODELS)},
+                        "task_type": {"enum": sorted(TASK_TYPES)},
+                        "acceptance_checks": {"type": "array", "items": {"type": "string"}},
+                        "stakes": {"type": "boolean"},
+                        "role": {"enum": sorted(ENVELOPE_ROLES)},
+                        "skills": {"type": "array"},
+                        "constraints": {"type": "array"},
+                        "context_files": {"type": "array"},
+                        "input_artifacts": {"type": "array"},
+                    },
+                },
+            },
         },
     },
 }
@@ -121,6 +176,26 @@ def validate_task_envelope(env: dict) -> list[str]:
         value = env.get(field)
         if value is not None and not isinstance(value, list):
             errors.append(f"'{field}' must be a list when present")
+    if "role" in env and env.get("role") not in ENVELOPE_ROLES:
+        errors.append(f"'role' must be one of {sorted(ENVELOPE_ROLES)} when present")
+    if "stakes" in env and not isinstance(env.get("stakes"), bool):
+        errors.append("'stakes' must be a boolean when present")
+    # NUMBERS RULE at the orchestrator layer: a stakes task never runs on the
+    # Ollama bridge, no matter which tier tried to route it there.
+    if env.get("stakes") and env.get("assigned_model") == "glm-5.2":
+        errors.append(
+            "a stakes task (money/price/quote/invoice/legal) must stay on a Claude "
+            "tier — never assign it to glm-5.2 (NUMBERS RULE)"
+        )
+    # Keyword backstop for the same rule: a sub-manager that forgets to set
+    # stakes:true on a money-ish objective still can't land it on the bridge.
+    if env.get("assigned_model") == "glm-5.2" and not env.get("stakes"):
+        hit = _STAKES_HINT_RE.search(str(env.get("objective", "")))
+        if hit:
+            errors.append(
+                f"objective mentions '{hit.group(0)}' — money/quote/invoice/legal "
+                "work must stay on a Claude tier (NUMBERS RULE keyword backstop)"
+            )
     return errors
 
 
@@ -269,6 +344,8 @@ def delegate(
     system_parts = [load_system_card(env["assigned_model"], cards_dir)]
     for name, text in resolve_skills(env.get("skills") or [], skills_dirs or []):
         system_parts.append(f"\n--- SKILL PACK: {name} ---\n{text}")
+    if env.get("role") == "orchestrator":
+        system_parts.append(ORCHESTRATOR_NOTE)
     system_prompt = "\n".join(system_parts)
 
     store.save_envelope(env["run_id"], env["task_id"], "task", env)
@@ -283,4 +360,142 @@ def delegate(
     for artifact in result.get("artifacts") or []:
         store.save_artifact(env["run_id"], artifact["path"], artifact["content"])
     store.save_envelope(env["run_id"], env["task_id"], "result", result)
+    return result
+
+
+# caller_for(assigned_model) -> ModelCaller. Lets orchestrate() pick the right
+# engine per task (Anthropic for Claude tiers, the Ollama bridge for glm-5.2) —
+# in server.py this is core.ModelCaller selection; in tests it's a fake.
+CallerFor = Callable[[str], ModelCaller]
+
+
+def _failed_result(run_id: str, task_id: str, error: str) -> dict:
+    """Synthetic result envelope for a child that could not be dispatched —
+    the run continues, the failure is honest and visible."""
+    return {
+        "envelope_version": ENVELOPE_VERSION,
+        "run_id": run_id,
+        "task_id": task_id,
+        "status": "failed",
+        "summary": error,
+        "self_check": {"verified": [], "unverified": [f"dispatch failed: {error}"]},
+    }
+
+
+def orchestrate(
+    env: dict,
+    caller_for: CallerFor,
+    store: RunStore,
+    cards_dir: Optional[str] = None,
+    skills_dirs: Optional[list[str]] = None,
+    workspace_root: Optional[str] = None,
+    depth: int = 0,
+    max_depth: int = MAX_ORCHESTRATION_DEPTH,
+    _seen_task_ids: Optional[set] = None,
+) -> dict:
+    """Two-tier delegation. Run `env` on its assigned worker; if that worker is
+    a SUB-MANAGER (role='orchestrator') that completed with `subtasks`, execute
+    each child cheapest-first (recursively, depth-limited) and attach the child
+    results under `subtask_results`.
+
+    The chain: Fable (the calling session) builds the top envelope, usually
+    assigned to claude-opus-4-8 with role='orchestrator'. Opus decomposes into
+    children routed to glm-5.2 / sonnet / haiku (rarely another opus). Every
+    leaf passes the same NUMBERS-RULE-safe validation.
+
+    Containment rules (each one exists because a review found the hole):
+    - Subtasks from a NON-orchestrator worker are never executed — a leaf model
+      (especially the open-weight bridge) must not be able to spawn work.
+    - Subtasks from a manager whose own status is not 'completed' are ignored.
+    - Duplicate task_ids are refused (they'd overwrite each other on disk).
+    - One failed child doesn't abort the run: it becomes a failed result
+      envelope and the siblings + parent record still persist.
+    - A child with a valid completed result already on disk is not re-run
+    (crash resume; the manager must re-emit the same task_ids for full reuse).
+    """
+    seen = _seen_task_ids if _seen_task_ids is not None else set()
+    seen.add(env["task_id"])
+
+    if depth > 0:
+        prior = store.load_result(env["run_id"], env["task_id"])
+        if prior and prior.get("status") == "completed" and not validate_result_envelope(
+            prior, env["run_id"], env["task_id"]
+        ):
+            store.log_usage(env["run_id"], {
+                "task_id": env["task_id"], "depth": depth, "status": "resumed_from_disk",
+            })
+            return prior
+
+    caller = caller_for(env["assigned_model"])
+    result = delegate(
+        env, caller, store,
+        cards_dir=cards_dir, skills_dirs=skills_dirs, workspace_root=workspace_root,
+    )
+    store.log_usage(env["run_id"], {
+        "task_id": env["task_id"],
+        "model": env["assigned_model"],
+        "role": env.get("role", "worker"),
+        "depth": depth,
+        "status": result.get("status"),
+        "usage_note": result.get("usage_note", ""),
+    })
+
+    subtasks = result.get("subtasks") or []
+    if not subtasks:
+        return result
+
+    notes = result.setdefault("orchestration_notes", [])
+    if env.get("role") != "orchestrator":
+        # A plain worker (or the open-weight bridge) has no authority to spawn
+        # work — record and ignore. This is the injection/cost-amplification gate.
+        notes.append(
+            f"{len(subtasks)} subtask(s) returned by a non-orchestrator worker — refused."
+        )
+        store.save_envelope(env["run_id"], env["task_id"], "orchestrated-result", result)
+        return result
+    if result.get("status") != "completed":
+        notes.append(
+            f"sub-manager status is '{result.get('status')}' — its {len(subtasks)} "
+            "subtask(s) were not executed."
+        )
+        store.save_envelope(env["run_id"], env["task_id"], "orchestrated-result", result)
+        return result
+    if depth >= max_depth:
+        notes.append(
+            f"{len(subtasks)} subtask(s) returned at depth {depth} but max_depth "
+            f"{max_depth} was reached — not expanded; flatten the plan or raise max_depth."
+        )
+        store.log_usage(env["run_id"], {
+            "task_id": env["task_id"], "depth": depth,
+            "status": "depth_capped", "subtasks_unexpanded": len(subtasks),
+        })
+        store.save_envelope(env["run_id"], env["task_id"], "orchestrated-result", result)
+        return result
+
+    child_results = []
+    for child in subtasks:
+        child = dict(child)
+        child["run_id"] = env["run_id"]
+        child["envelope_version"] = ENVELOPE_VERSION
+        cid = str(child.get("task_id", ""))
+        if cid in seen:
+            child_results.append(_failed_result(
+                env["run_id"], cid or "T???",
+                f"duplicate task_id {cid!r} in this run — refused (would overwrite "
+                "an earlier envelope on disk)",
+            ))
+            continue
+        try:
+            child_results.append(
+                orchestrate(
+                    child, caller_for, store,
+                    cards_dir=cards_dir, skills_dirs=skills_dirs,
+                    workspace_root=workspace_root,
+                    depth=depth + 1, max_depth=max_depth, _seen_task_ids=seen,
+                )
+            )
+        except (ValueError, RuntimeError) as exc:
+            child_results.append(_failed_result(env["run_id"], cid or "T???", str(exc)))
+    result["subtask_results"] = child_results
+    store.save_envelope(env["run_id"], env["task_id"], "orchestrated-result", result)
     return result

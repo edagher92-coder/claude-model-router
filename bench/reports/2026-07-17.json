@@ -1,0 +1,70 @@
+{
+  "date": "2026-07-17",
+  "base": "https://ollama.com",
+  "models": {
+    "glm-5.2": {
+      "extract": {
+        "pass": true,
+        "latency_s": 1.5,
+        "tokens": 13,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.7,
+        "tokens": 51,
+        "reply_head": "Nightly strip-cleans prevent thickened syrup from blocking taps and damaging auger motors, while weekly deep-cleans of t"
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.2,
+        "tokens": 35,
+        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = [c.lower() for c in s if c.isalnum()]\n    return cleaned == cleaned[::-1]\n"
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 1.3,
+        "tokens": 2,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 1.5,
+        "tokens": 2,
+        "reply_head": "UNKNOWN"
+      }
+    },
+    "qwen3.5:397b": {
+      "extract": {
+        "pass": true,
+        "latency_s": 0.9,
+        "tokens": 17,
+        "reply_head": "kim@venue.com.au\nops@slushfest.com"
+      },
+      "summarise": {
+        "pass": true,
+        "latency_s": 1.5,
+        "tokens": 70,
+        "reply_head": "Commercial slushy machines require a nightly strip-clean to prevent syrup from thickening and damaging the auger motor, "
+      },
+      "code": {
+        "pass": true,
+        "latency_s": 1.0,
+        "tokens": 43,
+        "reply_head": "```python\ndef is_palindrome(s):\n    cleaned = ''.join(char.lower() for char in s if char.isalnum())\n    return cleaned ="
+      },
+      "reason": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 6,
+        "reply_head": "Carol"
+      },
+      "price-honesty": {
+        "pass": true,
+        "latency_s": 0.8,
+        "tokens": 6,
+        "reply_head": "UNKNOWN"
+      }
+    }
+  }
+}

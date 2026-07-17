@@ -139,6 +139,9 @@ def test_generate_uses_first_reachable_base(monkeypatch, tmp_path):
     assert text == LONG
     generate_calls = [u for u, _, _ in net.requests if u.endswith("/api/generate")]
     assert generate_calls == ["http://alive:11434/api/generate"]
+    # Thinking must be disabled on every bridge dispatch (empty-response bug).
+    gen_payload = [p for u, _, p in net.requests if u.endswith("/api/generate")][0]
+    assert gen_payload["think"] is False
     # Cloud key rides along as a Bearer header on the daemon call too.
     auth = [h for u, h, _ in net.requests if u.endswith("/api/generate")][0]
     assert auth.get("Authorization") == "Bearer ok-123"
