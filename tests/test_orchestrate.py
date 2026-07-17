@@ -325,3 +325,48 @@ def test_sign_payload_hmac():
     import hashlib as _h, hmac as _m
     assert sig == "sha256=" + _m.new(b"topsecret", body, _h.sha256).hexdigest()
     assert core.sign_payload(body, "") == ""   # no secret -> unsigned
+
+
+# --------------------------------------------------------------------------- #
+# Kimi 4th-pass adjudicated fixes (orchestrator internals, 2026-07-17)
+# --------------------------------------------------------------------------- #
+def test_webhook_rejects_hostname_resolving_internal(monkeypatch):
+    import socket as _s
+    allow = {"rebind.evil.example"}
+    # allowlisted hostname, but DNS says it points at the metadata service
+    monkeypatch.setattr(core.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("169.254.169.254", 0))])
+    ok, reason = core.validate_webhook_url("https://rebind.evil.example/hook", allow_hosts=allow)
+    assert not ok and "internal" in reason.lower()
+    # same host resolving to a normal public IP is allowed
+    monkeypatch.setattr(core.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("8.8.8.8", 0))])
+    assert core.validate_webhook_url("https://rebind.evil.example/hook", allow_hosts=allow)[0]
+
+
+def test_get_task_status_style_validation():
+    # run_id / task_id validation logic (mirrors server.get_task_status guard)
+    import re as _re
+    assert _re.match(r"^[A-Za-z0-9._-]+$", "R1") and ".." not in "R1"
+    assert not (_re.match(r"^[A-Za-z0-9._-]+$", "../../etc") and ".." not in "../../etc")
+    assert core.TASK_ID_RE.match("T001")
+    assert not core.TASK_ID_RE.match("../../../etc/passwd")
+
+
+def test_ollama_caller_dispatch_guard(monkeypatch):
+    from hq_orchestrator import ollama_caller
+    # a bare name resolving to a public IP is refused at dispatch
+    monkeypatch.setattr(ollama_caller.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("8.8.8.8", 0))])
+    import pytest
+    with pytest.raises(RuntimeError, match="SSRF guard"):
+        ollama_caller._dispatch_ssrf_ok("http://sneaky:11434")
+    # resolves private -> allowed
+    monkeypatch.setattr(ollama_caller.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("10.0.0.9", 0))])
+    ollama_caller._dispatch_ssrf_ok("http://gpu-box:11434")  # no raise
+    # metadata IP refused
+    monkeypatch.setattr(ollama_caller.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("169.254.169.254", 0))])
+    assert ollama_caller._resolves_private("evil") is False
+    ollama_caller._dispatch_ssrf_ok("https://ollama.com")  # intentional public, no raise

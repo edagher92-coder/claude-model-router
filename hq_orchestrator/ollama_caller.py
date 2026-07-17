@@ -23,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -83,6 +84,46 @@ def is_allowed_base(url: str) -> tuple[bool, str]:
     if "." not in host_l:                           # single-label = LAN, not public
         return True, "single-label LAN hostname"
     return False, f"public host '{host}' blocked (SSRF)"
+
+
+def _resolves_private(host: str) -> bool:
+    """Dispatch-time DNS guard (mirror of router._host_resolves_private): a
+    hostname must resolve to loopback/RFC1918/Tailscale before we POST to it,
+    closing the single-label-resolves-public and DNS-rebinding gaps Kimi flagged.
+    Fail closed on resolution error."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    saw = False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return False
+        saw = True
+        if ip.is_link_local:
+            return False
+        if ip.is_loopback or ip.is_private or ip in ipaddress.ip_network("100.64.0.0/10"):
+            continue
+        return False
+    return saw
+
+
+def _dispatch_ssrf_ok(base: str) -> None:
+    host = (urllib.parse.urlparse(base).hostname or "").lower()
+    if not host:
+        raise RuntimeError(f"invalid Ollama base (no host): {base}")
+    try:
+        ipaddress.ip_address(host)
+        return  # IP literal already range-checked by is_allowed_base
+    except ValueError:
+        pass
+    extra = {h.strip().lower() for h in os.environ.get("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "").split(",") if h.strip()}
+    if host == "ollama.com" or host in extra:
+        return
+    if not _resolves_private(host):
+        raise RuntimeError(f"SSRF guard: '{host}' did not resolve to a private/loopback/Tailscale IP")
 
 
 def _bases() -> list[str]:
@@ -163,6 +204,11 @@ def call(model: str, system: str, message: str, submit_tool: dict, timeout: int 
             time.sleep(delay)
         # Walk the chain each round: routing server first, cloud as backstop.
         for base in bases:
+            try:
+                _dispatch_ssrf_ok(base)  # re-resolve just before connecting (DNS rebinding)
+            except RuntimeError as exc:
+                last_error = exc
+                continue
             request = urllib.request.Request(base + "/api/chat", data=payload, headers=headers)
             try:
                 with urllib.request.urlopen(request, timeout=timeout) as response:

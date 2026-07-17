@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -142,14 +143,23 @@ def get_task_status(run_id: str, task_id: str) -> dict:
     """Recover a task's state after an orchestrator restart. Prefers the
     orchestrated result (which carries subtask_results/orchestration_notes)
     over the plain worker result when both exist."""
+    # Validate BEFORE building any path — run_id/task_id are MCP params and were
+    # used to construct a path (orch.exists()/read_text) before _store's own
+    # validation ran, a path-traversal read/probe (Kimi 4th-pass #12/#13).
+    if not re.match(r"^[A-Za-z0-9._-]+$", run_id) or ".." in run_id:
+        raise ValueError(f"unsafe run_id: {run_id!r}")
+    if not core.TASK_ID_RE.match(task_id):
+        raise ValueError(f"unsafe task_id: {task_id!r} (must match T000)")
     run_dir = _store.base / "runs" / run_id / "tasks" / task_id
     orch = run_dir / "orchestrated-result-envelope.json"
     if orch.exists():
-        return {"status": "completed", "result_envelope": json.loads(orch.read_text(encoding="utf-8"))}
+        return {"status": "found", "result_envelope": json.loads(orch.read_text(encoding="utf-8"))}
     result = _store.load_result(run_id, task_id)
     if result is None:
         return {"status": "not_found", "result_envelope": None}
-    return {"status": "completed", "result_envelope": result}
+    # 'found' (not 'completed') — the wrapper must not claim completion for a
+    # result whose own status is 'failed'/'needs_input' (Kimi 4th-pass #18).
+    return {"status": "found", "result_envelope": result}
 
 
 @mcp.tool()
