@@ -167,6 +167,24 @@ def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, flo
     return (body.get("response") or "").strip(), latency, int(body.get("eval_count") or 0)
 
 
+def discover_models(base: str, api_key: str) -> list:
+    """Model names the bridge advertises via /api/tags. Lets the weekly bench
+    auto-include a newly-released cloud model (e.g. Kimi K3 Max) with no code
+    change and no tag guessing. Best-effort: returns [] on any error."""
+    import urllib.request
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    try:
+        req = urllib.request.Request(base + "/api/tags", headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        return [m.get("name") for m in body.get("models", []) if m.get("name")]
+    except Exception as exc:  # noqa: BLE001 - discovery is optional, never fatal
+        print(f"discover: /api/tags failed ({exc}); using the static model list", flush=True)
+        return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="router v5.1 weekly model bench")
     parser.add_argument("--models", default=",".join(DEFAULT_MODELS))
@@ -175,11 +193,21 @@ def main() -> int:
                              "(skipped unless ANTHROPIC_API_KEY is set); '' disables")
     parser.add_argument("--base", default="")
     parser.add_argument("--out-dir", default=str(HERE / "reports"))
+    parser.add_argument("--discover", action="store_true",
+                        help="also bench every model the bridge lists in /api/tags "
+                             "(auto-picks up NEW cloud models like Kimi K3 Max the day "
+                             "they land — no tag guessing, runs PC-off in CI)")
     args = parser.parse_args()
 
     api_key = os.getenv("OLLAMA_API_KEY", "").strip()
     base = (args.base or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if args.discover:
+        found = discover_models(base, api_key)
+        added = [m for m in found if m not in models]
+        if added:
+            print(f"discover: +{len(added)} new model(s): {', '.join(added)}", flush=True)
+        models = list(dict.fromkeys(models + found))
     baselines = [m.strip() for m in args.baselines.split(",") if m.strip()]
     if baselines and not os.getenv("ANTHROPIC_API_KEY", "").strip():
         print("note: ANTHROPIC_API_KEY unset — Claude baselines skipped", flush=True)
