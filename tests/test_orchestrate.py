@@ -1,0 +1,277 @@
+"""Two-tier delegation tests for hq_orchestrator.core.orchestrate.
+
+No network, no API keys: a fake caller_for parses the task_id out of the worker
+message and returns a scripted result envelope, recording every system prompt it
+saw so we can assert on routing and the orchestrator note.
+
+The chain under test: Fable (the test) builds a top envelope assigned to an Opus
+sub-manager (role=orchestrator); Opus returns child subtasks routed to
+glm/sonnet/haiku; orchestrate() executes them cheapest-first, depth-limited.
+"""
+import json
+import re
+
+import pytest
+
+from hq_orchestrator import core
+
+
+@pytest.fixture
+def cards_dir(tmp_path):
+    d = tmp_path / "cards"
+    d.mkdir()
+    (d / "opus-4-8-engineer.md").write_text("You are the Opus engineer.", encoding="utf-8")
+    (d / "sonnet-5-developer.md").write_text("You are the Sonnet developer.", encoding="utf-8")
+    return str(d)
+
+
+@pytest.fixture
+def store(tmp_path):
+    return core.RunStore(tmp_path / "runs-base")
+
+
+def make_caller_for(script, seen):
+    """script: {task_id: dict of extra result fields (e.g. subtasks, summary)}.
+    seen: list that receives (model_id, system_prompt, task_id) per call."""
+    def caller_for(assigned_model):
+        def caller(model_id, system, message, submit_tool):
+            tid = re.search(r'"task_id": "(T\d{3})"', message).group(1)
+            rid = re.search(r'"run_id": "([^"]+)"', message).group(1)
+            seen.append((model_id, system, tid))
+            result = {
+                "envelope_version": "1.0",
+                "run_id": rid,
+                "task_id": tid,
+                "status": "completed",
+                "self_check": {"verified": [], "unverified": []},
+            }
+            result.update(script.get(tid, {}))
+            return result
+        return caller
+    return caller_for
+
+
+def top_env(**over):
+    env = {
+        "envelope_version": "1.0",
+        "run_id": "R1",
+        "task_id": "T001",
+        "objective": "Ship the feature",
+        "assigned_model": "claude-opus-4-8",
+        "task_type": "implementation",
+        "acceptance_checks": ["it works"],
+        "role": "orchestrator",
+    }
+    env.update(over)
+    return env
+
+
+def child(task_id, model, objective="do a slice", stakes=None):
+    c = {
+        "task_id": task_id,
+        "objective": objective,
+        "assigned_model": model,
+        "task_type": "implementation",
+        "acceptance_checks": ["done"],
+    }
+    if stakes is not None:
+        c["stakes"] = stakes
+    return c
+
+
+# --------------------------------------------------------------------------- #
+# Single tier (no subtasks) — orchestrate == delegate
+# --------------------------------------------------------------------------- #
+def test_leaf_task_returns_direct_result(cards_dir, store):
+    seen = []
+    caller_for = make_caller_for({"T001": {"summary": "done directly"}}, seen)
+    env = top_env(role="worker")  # a plain worker, no decomposition
+
+    result = core.orchestrate(env, caller_for, store, cards_dir=cards_dir)
+
+    assert result["status"] == "completed"
+    assert "subtask_results" not in result
+    assert [s[2] for s in seen] == ["T001"]
+    # role != orchestrator -> no orchestrator note in the system prompt
+    assert "ORCHESTRATOR MODE" not in seen[0][1]
+
+
+# --------------------------------------------------------------------------- #
+# Two tiers — Opus decomposes to glm/sonnet/haiku
+# --------------------------------------------------------------------------- #
+def test_opus_decomposes_and_children_run_cheapest_first(cards_dir, store):
+    seen = []
+    script = {
+        "T001": {"subtasks": [
+            child("T010", "glm-5.2", "summarise the corpus"),
+            child("T011", "claude-sonnet-5", "write the module"),
+            child("T012", "claude-haiku-4-5", "reformat the table"),
+        ]},
+        "T010": {"summary": "bulk summary"},
+        "T011": {"summary": "module written"},
+        "T012": {"summary": "table reformatted"},
+    }
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(), caller_for, store, cards_dir=cards_dir)
+
+    # Opus got the orchestrator note; three children executed on their tiers.
+    assert "ORCHESTRATOR MODE" in seen[0][1]
+    ran = {tid: model for model, _system, tid in seen}
+    assert ran == {
+        "T001": "claude-opus-4-8",
+        "T010": "glm-5.2",
+        "T011": "claude-sonnet-5",
+        "T012": "claude-haiku-4-5-20251001",  # WORKER_MODELS maps to the dated API id
+    }
+    assert len(result["subtask_results"]) == 3
+    assert {r["task_id"] for r in result["subtask_results"]} == {"T010", "T011", "T012"}
+    # Children were persisted under the same run.
+    assert store.load_result("R1", "T011")["summary"] == "module written"
+
+
+# --------------------------------------------------------------------------- #
+# Three tiers + depth cap
+# --------------------------------------------------------------------------- #
+def test_depth_cap_stops_runaway(cards_dir, store):
+    seen = []
+    # T001(opus) -> T010(opus orchestrator) -> T020(opus orchestrator) -> would
+    # spawn T030 at depth 2, which must NOT expand.
+    script = {
+        "T001": {"subtasks": [dict(child("T010", "claude-opus-4-8"), role="orchestrator")]},
+        "T010": {"subtasks": [dict(child("T020", "claude-opus-4-8"), role="orchestrator")]},
+        "T020": {"subtasks": [child("T030", "glm-5.2")]},
+        "T030": {"summary": "should never run"},
+    }
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(), caller_for, store, cards_dir=cards_dir, max_depth=2)
+
+    ran = [tid for _m, _s, tid in seen]
+    assert "T030" not in ran, "depth-2 subtasks must not expand"
+    assert ran == ["T001", "T010", "T020"]
+    # The unexpanded plan is surfaced honestly, not dropped silently.
+    deepest = result["subtask_results"][0]["subtask_results"][0]
+    assert "orchestration_notes" in deepest
+    assert "max_depth" in deepest["orchestration_notes"][0]
+
+
+# --------------------------------------------------------------------------- #
+# NUMBERS RULE — a stakes task can never be routed to the Ollama bridge
+# --------------------------------------------------------------------------- #
+def test_stakes_child_on_glm_is_contained_as_failed(cards_dir, store):
+    # The bad child is refused, but the run survives: sibling still executes.
+    seen = []
+    script = {"T001": {"subtasks": [
+        child("T010", "glm-5.2", "quote the customer", stakes=True),
+        child("T011", "claude-sonnet-5", "safe sibling work"),
+    ]}, "T011": {"summary": "sibling done"}}
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(), caller_for, store, cards_dir=cards_dir)
+
+    by_id = {r["task_id"]: r for r in result["subtask_results"]}
+    assert by_id["T010"]["status"] == "failed" and "NUMBERS RULE" in by_id["T010"]["summary"]
+    assert by_id["T011"]["status"] == "completed"
+    assert "T010" not in [tid for _m, _s, tid in seen]  # never dispatched
+
+
+def test_stakes_keyword_backstop_catches_forgotten_flag():
+    # Sub-manager "forgot" stakes:true but the objective is money-ish.
+    errs = core.validate_task_envelope({
+        "envelope_version": "1.0", "run_id": "R", "task_id": "T001",
+        "objective": "draft the invoice email for the Merivale refund",
+        "assigned_model": "glm-5.2", "task_type": "copywriting",
+        "acceptance_checks": ["c"],
+    })
+    assert any("keyword backstop" in e for e in errs)
+    # Non-money bulk work on glm is still fine.
+    assert core.validate_task_envelope({
+        "envelope_version": "1.0", "run_id": "R", "task_id": "T001",
+        "objective": "summarise this maintenance research corpus",
+        "assigned_model": "glm-5.2", "task_type": "analysis",
+        "acceptance_checks": ["c"],
+    }) == []
+
+
+# --------------------------------------------------------------------------- #
+# Containment: role gate, status gate, duplicate ids, resume
+# --------------------------------------------------------------------------- #
+def test_worker_returned_subtasks_are_refused(cards_dir, store):
+    # A leaf (e.g. the open-weight bridge) trying to spawn work is refused.
+    seen = []
+    script = {"T001": {"subtasks": [child("T010", "claude-opus-4-8", "spawn expensive work")]}}
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(role="worker"), caller_for, store, cards_dir=cards_dir)
+
+    assert "subtask_results" not in result
+    assert any("refused" in n for n in result["orchestration_notes"])
+    assert [tid for _m, _s, tid in seen] == ["T001"]
+
+
+def test_failed_manager_plan_is_not_executed(cards_dir, store):
+    seen = []
+    script = {"T001": {"status": "failed", "subtasks": [child("T010", "claude-sonnet-5")]}}
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(), caller_for, store, cards_dir=cards_dir)
+
+    assert [tid for _m, _s, tid in seen] == ["T001"]
+    assert any("not executed" in n for n in result["orchestration_notes"])
+
+
+def test_duplicate_task_id_is_refused_not_overwritten(cards_dir, store):
+    seen = []
+    script = {"T001": {"subtasks": [
+        child("T001", "claude-sonnet-5", "same id as parent"),   # collision
+        child("T010", "claude-sonnet-5", "fine"),
+    ]}, "T010": {"summary": "ok"}}
+    caller_for = make_caller_for(script, seen)
+
+    result = core.orchestrate(top_env(), caller_for, store, cards_dir=cards_dir)
+
+    by_id = {r["task_id"]: r for r in result["subtask_results"]}
+    assert by_id["T001"]["status"] == "failed" and "duplicate" in by_id["T001"]["summary"]
+    assert by_id["T010"]["status"] == "completed"
+    # Parent's own result on disk was not clobbered by the colliding child.
+    assert store.load_result("R1", "T001").get("subtasks")
+
+
+def test_completed_child_resumes_from_disk(cards_dir, store):
+    # First run completes T010; second run must NOT re-dispatch it.
+    script = {"T001": {"subtasks": [child("T010", "claude-sonnet-5")]},
+              "T010": {"summary": "expensive result"}}
+    seen1 = []
+    core.orchestrate(top_env(), make_caller_for(script, seen1), store, cards_dir=cards_dir)
+    assert "T010" in [tid for _m, _s, tid in seen1]
+
+    seen2 = []
+    result = core.orchestrate(top_env(), make_caller_for(script, seen2), store, cards_dir=cards_dir)
+    assert "T010" not in [tid for _m, _s, tid in seen2], "completed child must resume from disk"
+    assert result["subtask_results"][0]["summary"] == "expensive result"
+
+
+def test_stakes_validation_direct():
+    errs = core.validate_task_envelope({
+        "envelope_version": "1.0", "run_id": "R", "task_id": "T001",
+        "objective": "x", "assigned_model": "glm-5.2", "task_type": "analysis",
+        "acceptance_checks": ["c"], "stakes": True,
+    })
+    assert any("NUMBERS RULE" in e for e in errs)
+    # same task on a Claude tier is fine
+    errs_ok = core.validate_task_envelope({
+        "envelope_version": "1.0", "run_id": "R", "task_id": "T001",
+        "objective": "x", "assigned_model": "claude-sonnet-5", "task_type": "analysis",
+        "acceptance_checks": ["c"], "stakes": True,
+    })
+    assert errs_ok == []
+
+
+def test_bad_role_rejected():
+    errs = core.validate_task_envelope({
+        "envelope_version": "1.0", "run_id": "R", "task_id": "T001",
+        "objective": "x", "assigned_model": "claude-sonnet-5", "task_type": "analysis",
+        "acceptance_checks": ["c"], "role": "boss",
+    })
+    assert any("role" in e for e in errs)

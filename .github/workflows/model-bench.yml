@@ -1,0 +1,36 @@
+# Weekly fleet check: bench the Ollama Cloud models the router delegates to,
+# and commit the dated report. No-ops safely until the OLLAMA_API_KEY secret
+# is set. Zero Claude tokens — this only exercises the flat-rate Ollama sub.
+name: Weekly model bench
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * 0"   # Mondays 06:00 AEST (Sunday 20:00 UTC)
+permissions:
+  contents: write
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bench (no-op if key unset)
+        env:
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+        run: |
+          if [ -z "$OLLAMA_API_KEY" ]; then
+            echo "OLLAMA_API_KEY not set - nothing to do. Add the secret to enable the weekly bench."
+            exit 0
+          fi
+          python3 bench/model_bench.py
+      - name: Commit report
+        run: |
+          if [ -n "$(git status --porcelain bench/reports)" ]; then
+            git config user.name "model-bench"
+            git config user.email "actions@users.noreply.github.com"
+            git add bench/reports
+            git commit -m "bench: weekly model report [skip ci]"
+            git push
+          else
+            echo "no new report to commit"
+          fi

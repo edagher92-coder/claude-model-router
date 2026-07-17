@@ -135,7 +135,13 @@ export CLAUDE_ROUTER_FABLE_EFFORT=high
 ## Files
 
 - `router.py` — classifier, registry, dispatch, fallback, doctor, and usage log.
-- `hq_orchestrator/` — MCP server for the tri-agent handoff protocol (see below).
+- `hq_orchestrator/` — MCP server for the tri-agent handoff protocol (see below),
+  including two-tier delegation (`orchestrate_task`: Opus sub-manager returns child
+  envelopes, executed cheapest-first, depth-capped).
+- `ORCHESTRATION.md` — the Fable-leads / Opus-manages / fleet-executes policy.
+- `bench/model_bench.py` — weekly Ollama fleet bench (extract / summarise / code /
+  reasoning / price-honesty); dated reports in `bench/reports/`; `model-bench.yml`
+  runs it Mondays once the `OLLAMA_API_KEY` secret is set.
 - `tests/` — offline test suite (no network, no keys): `python -m pytest tests/`.
 - `MODEL-ROUTING-POLICY.md` — quality-first routing policy for Claude Code / cowork sessions.
 - `router-usage.csv` — generated locally at runtime; do not commit sensitive logs.

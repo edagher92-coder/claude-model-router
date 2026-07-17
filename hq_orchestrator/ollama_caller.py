@@ -75,6 +75,9 @@ def call(model: str, system: str, message: str, submit_tool: dict, timeout: int 
             {"role": "user", "content": message},
         ],
         "stream": False,
+        # Thinking models otherwise burn the output budget on hidden reasoning
+        # and can return an empty message (see router.py _generate_at).
+        "think": False,
         "format": submit_tool["input_schema"],
     }).encode("utf-8")
     headers = {"Content-Type": "application/json"}

@@ -113,8 +113,39 @@ def delegate_task(run_id: str, task_envelope: dict, timeout_seconds: int = 600) 
 
 
 @mcp.tool()
+def orchestrate_task(run_id: str, task_envelope: dict, max_depth: int = core.MAX_ORCHESTRATION_DEPTH) -> dict:
+    """Two-tier delegation: dispatch a task envelope whose worker may be a
+    sub-manager (role='orchestrator', usually claude-opus-4-8). If it returns
+    child subtasks, they are executed cheapest-first — Claude tiers via the
+    Anthropic caller, glm-5.2 via the Ollama bridge — recursively, depth-capped.
+    Stakes tasks are rejected on glm-5.2 at validation (NUMBERS RULE)."""
+    if task_envelope.get("run_id") not in (None, run_id):
+        raise ValueError("run_id argument and task_envelope.run_id disagree")
+    task_envelope["run_id"] = run_id
+    # Callers can lower the depth cap but never defeat the runaway backstop.
+    max_depth = min(max_depth, 4)
+    # Per-task usage rows are logged inside core.orchestrate (exactly once per
+    # task, leaves included) — no duplicate summary row here.
+    return core.orchestrate(
+        task_envelope,
+        caller_for=_caller_for,
+        store=_store,
+        cards_dir=os.getenv("HQ_CARDS_DIR"),
+        skills_dirs=_skills_dirs(),
+        workspace_root=os.getenv("HQ_WORKSPACE_ROOT"),
+        max_depth=max_depth,
+    )
+
+
+@mcp.tool()
 def get_task_status(run_id: str, task_id: str) -> dict:
-    """Recover a task's state after an orchestrator restart."""
+    """Recover a task's state after an orchestrator restart. Prefers the
+    orchestrated result (which carries subtask_results/orchestration_notes)
+    over the plain worker result when both exist."""
+    run_dir = _store.base / "runs" / run_id / "tasks" / task_id
+    orch = run_dir / "orchestrated-result-envelope.json"
+    if orch.exists():
+        return {"status": "completed", "result_envelope": json.loads(orch.read_text(encoding="utf-8"))}
     result = _store.load_result(run_id, task_id)
     if result is None:
         return {"status": "not_found", "result_envelope": None}

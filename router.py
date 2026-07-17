@@ -573,6 +573,11 @@ def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_token
         "model": model_tag,
         "prompt": prompt,
         "stream": False,
+        # Thinking models (glm-5.2, qwen3.5, ...) otherwise spend the whole
+        # num_predict budget on hidden reasoning and return an EMPTY response,
+        # which the router misreads as a bridge failure (observed live
+        # 2026-07-17). Ignored by non-thinking models.
+        "think": False,
         "options": {"num_predict": max_tokens},
     }).encode("utf-8")
     request = urllib.request.Request(base + "/api/generate", data=payload, headers=_auth_headers(api_key))
