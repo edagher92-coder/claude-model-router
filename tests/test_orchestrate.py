@@ -297,3 +297,31 @@ def test_bridge_worker_identity_fields_are_stamped(cards_dir, store):
     result = core.orchestrate(env, caller_for, store, cards_dir=cards_dir)
     assert result["run_id"] == "R1" and result["task_id"] == "T001"
     assert result["status"] == "completed" and result["summary"] == "real content"
+
+
+# --------------------------------------------------------------------------- #
+# Second-pass SEVERE: route_to_automation webhook SSRF + HMAC
+# --------------------------------------------------------------------------- #
+def test_validate_webhook_url_matrix():
+    allow = {"hooks.zapier.com", "api.elevenlabs.io"}
+    ok = core.validate_webhook_url("https://hooks.zapier.com/x", allow_hosts=allow)
+    assert ok[0]
+    # http (not https) refused
+    assert not core.validate_webhook_url("http://hooks.zapier.com/x", allow_hosts=allow)[0]
+    # host not allowlisted refused
+    assert not core.validate_webhook_url("https://attacker.com/x", allow_hosts=allow)[0]
+    # empty allowlist refuses everything (fail closed)
+    assert not core.validate_webhook_url("https://hooks.zapier.com/x", allow_hosts=set())[0]
+    # an internal IP literal is refused even if someone allowlists it
+    assert not core.validate_webhook_url("https://169.254.169.254/x", allow_hosts={"169.254.169.254"})[0]
+    assert not core.validate_webhook_url("https://127.0.0.1/x", allow_hosts={"127.0.0.1"})[0]
+    assert not core.validate_webhook_url("https://10.0.0.9/x", allow_hosts={"10.0.0.9"})[0]
+
+
+def test_sign_payload_hmac():
+    body = b'{"a":1}'
+    sig = core.sign_payload(body, "topsecret")
+    assert sig.startswith("sha256=")
+    import hashlib as _h, hmac as _m
+    assert sig == "sha256=" + _m.new(b"topsecret", body, _h.sha256).hexdigest()
+    assert core.sign_payload(body, "") == ""   # no secret -> unsigned

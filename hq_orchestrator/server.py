@@ -186,10 +186,21 @@ def route_to_automation(
     if not url:
         return {"status": "recorded_no_webhook",
                 "note": "payload written to outbox; no webhook_url in destination_config"}
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Idempotency-Key": f"{run_id}:{artifact_path}"},
-    )
+    # SSRF guard: this POSTs artifact content OUT, so the target must be an https
+    # host explicitly allowlisted via CLAUDE_ROUTER_WEBHOOK_ALLOW_HOSTS and must
+    # not be an internal/metadata IP. Refused otherwise — the payload is already
+    # safely recorded in the outbox above.
+    ok, reason = core.validate_webhook_url(url)
+    if not ok:
+        return {"status": "webhook_refused", "reason": reason,
+                "note": "payload recorded in outbox; not sent. Allowlist the host to enable delivery."}
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Idempotency-Key": f"{run_id}:{artifact_path}"}
+    # Optional HMAC so the receiver can verify the POST is genuinely from us.
+    signature = core.sign_payload(body, os.getenv("CLAUDE_ROUTER_WEBHOOK_SECRET", ""))
+    if signature:
+        headers["X-Signature"] = signature
+    request = urllib.request.Request(url, data=body, headers=headers)
     last_error: Exception | None = None
     for attempt, delay in enumerate((0,) + RETRY_DELAYS):
         if delay:
