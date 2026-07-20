@@ -727,3 +727,193 @@ def test_output_config_fallback_on_typeerror(monkeypatch, tmp_path):
     out = router.run("normal task", tier="sonnet", effort="high")
     assert out == "ok answer, long enough here"
     assert len(calls) == 2 and "output_config" not in calls[1]   # retried without it
+
+
+# --------------------------------------------------------------------------- #
+# Token-efficiency layer (output directive + input auto-compaction + widen)
+# --------------------------------------------------------------------------- #
+def _anthropic_client(calls, seq):
+    """FakeClient whose messages.create records kwargs and returns seq[i] =
+    (text, stop_reason) for the i-th call."""
+    class _Resp:
+        def __init__(self, text, sr):
+            self.content = [type("B", (), {"text": text})()]
+            self.usage = type("U", (), {"input_tokens": 1, "output_tokens": 2})()
+            self.stop_reason = sr
+
+    class _Msgs:
+        def create(self, **kw):
+            calls.append(kw)
+            text, sr = seq[min(len(calls) - 1, len(seq) - 1)]
+            return _Resp(text, sr)
+
+    class _Client:
+        messages = _Msgs()
+    return _Client
+
+
+def test_efficiency_directive_injected_on_anthropic(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    calls = []
+    monkeypatch.setattr(router, "_client",
+                        lambda: _anthropic_client(calls, [("A complete answer.", "end_turn")])())
+    router.run("do a thing", tier="sonnet")
+    assert calls[-1].get("system") == router.EFFICIENCY_DIRECTIVE
+
+
+def test_efficiency_directive_off_via_env(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    monkeypatch.setenv("CLAUDE_ROUTER_CONCISE", "0")
+    calls = []
+    monkeypatch.setattr(router, "_client",
+                        lambda: _anthropic_client(calls, [("A complete answer.", "end_turn")])())
+    router.run("do a thing", tier="sonnet")
+    assert "system" not in calls[-1]
+
+
+def test_efficiency_directive_injected_on_ollama(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, ollama_url="http://alive:11434")
+    net = FakeOllamaNet({"http://alive:11434": "A complete bridge answer here."})
+    monkeypatch.setattr(router.urllib.request, "urlopen", net)
+    monkeypatch.setattr(router, "_host_resolves_private", lambda h: True)
+    router.run("bulk digest", tier="glm")
+    gens = [p for (u, _h, p) in net.requests if u.endswith("/api/generate")]
+    assert gens and gens[-1].get("system") == router.EFFICIENCY_DIRECTIVE
+
+
+def test_classifier_call_has_no_directive_and_truncates(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    calls = []
+
+    class _Msgs:
+        def create(self, **kw):
+            calls.append(kw)
+            return type("R", (), {"content": [type("B", (), {"text": "SONNET"})()]})()
+
+    monkeypatch.setattr(router, "_client", lambda: type("C", (), {"messages": _Msgs()})())
+    big = "A" * 10000
+    assert router._classify(big) == "sonnet"
+    assert "system" not in calls[-1]                                  # never steer the classifier
+    assert len(calls[-1]["messages"][0]["content"]) < len(big)        # head+tail probe, not full body
+
+
+def test_compaction_safe_number_preservation(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    orig = "Refund $2,898.99 due 2026-07-30 to ops@snow.com " + ("boilerplate " * 40)
+    kept = "Refund $2,898.99 due 2026-07-30 ops@snow.com"       # shorter, all figures kept
+    dropped = "Refund the customer promptly and politely soon."  # numbers gone
+    assert router._compaction_safe(orig, kept) is True
+    assert router._compaction_safe(orig, dropped) is False
+
+
+def test_maybe_compact_stakes_never_compacts(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    seen = {"n": 0}
+    monkeypatch.setattr(router, "_compact_call",
+                        lambda *a, **k: seen.__setitem__("n", seen["n"] + 1) or "short")
+    big = "x" * 40000
+    out, was = router._maybe_compact(big, True, "sonnet", True)       # effective_stakes=True
+    assert out == big and was is False and seen["n"] == 0
+
+
+def test_maybe_compact_below_threshold_noop(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    seen = {"n": 0}
+    monkeypatch.setattr(router, "_compact_call",
+                        lambda *a, **k: seen.__setitem__("n", seen["n"] + 1))
+    out, was = router._maybe_compact("a small task", False, "sonnet", True)
+    assert was is False and seen["n"] == 0
+
+
+def test_maybe_compact_haiku_target_never_compacts(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    seen = {"n": 0}
+    monkeypatch.setattr(router, "_compact_call",
+                        lambda *a, **k: seen.__setitem__("n", seen["n"] + 1))
+    out, was = router._maybe_compact("x" * 40000, False, "haiku", True)  # Haiku-for-Haiku pays twice
+    assert was is False and seen["n"] == 0
+
+
+def test_maybe_compact_large_nonstakes_is_compacted(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    big = "Figures 111 222 333. " + ("filler " * 8000)
+    small = "Figures 111 222 333. filler"
+    monkeypatch.setattr(router, "_compact_call", lambda text, ok: small)
+    out, was = router._maybe_compact(big, False, "opus", True)
+    assert was is True and out == small
+
+
+def test_maybe_compact_dropped_number_falls_back(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    big = "Amount 12345 owed. " + ("filler " * 8000)
+    monkeypatch.setattr(router, "_compact_call", lambda text, ok: "no figures survived here")
+    out, was = router._maybe_compact(big, False, "opus", True)
+    assert was is False and out == big                               # number check rejects it
+
+
+def test_maybe_compact_truncated_compactor_falls_back(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    big = "Amount 12345 owed. " + ("filler " * 8000)
+    monkeypatch.setattr(router, "_compact_call", lambda text, ok: None)   # compactor itself truncated
+    out, was = router._maybe_compact(big, False, "opus", True)
+    assert was is False and out == big
+
+
+def test_compaction_call_carries_no_directive(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    calls = []
+    monkeypatch.setattr(router, "_client",
+                        lambda: _anthropic_client(calls, [("compacted 42 99", "end_turn")])())
+    router._compact_call("Numbers 42 and 99 " + ("x" * 5000), True)
+    assert "system" not in calls[-1]                                 # compaction is never steered
+
+
+def test_stakes_keyword_task_is_never_compacted(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    monkeypatch.setenv("CLAUDE_ROUTER_COMPACT_THRESHOLD", "10")
+    seen = {"n": 0}
+    monkeypatch.setattr(router, "_compact_call",
+                        lambda *a, **k: seen.__setitem__("n", seen["n"] + 1) or "x")
+    calls = []
+    monkeypatch.setattr(router, "_client",
+                        lambda: _anthropic_client(calls, [("Drafted the reply.", "end_turn")])())
+    big = "Please refund the customer their invoice of $500 " + ("detail " * 200)
+    router.run(big, tier="opus")                                     # keyword forces effective_stakes
+    assert seen["n"] == 0
+
+
+def test_widen_before_climb_retries_same_tier(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    calls = []
+    # first dispatch truncates, widened retry succeeds — SAME tier, bigger budget.
+    monkeypatch.setattr(router, "_client",
+                        lambda: _anthropic_client(calls, [("", "max_tokens"),
+                                                          ("A full answer.", "end_turn")])())
+    out = router.run("write a long thing", tier="sonnet")
+    assert out == "A full answer."
+    assert len(calls) == 2
+    assert calls[0]["model"] == calls[1]["model"] == "claude-sonnet-5"   # never left the tier
+    assert calls[1]["max_tokens"] > calls[0]["max_tokens"]              # widened before climbing
+
+
+def test_escalation_after_compaction_dispatches_original(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path, anthropic_key="k")
+    monkeypatch.setenv("CLAUDE_ROUTER_COMPACT_THRESHOLD", "10")
+    big = "Refs 42 and 99 in scope " + ("redundant " * 60)
+    monkeypatch.setattr(router, "_compact_call", lambda text, ok: "Refs 42 and 99 in scope")
+    contents = []
+
+    class _Msgs:
+        def create(self, **kw):
+            contents.append(kw["messages"][0]["content"])
+            # opus (call 1) returns empty -> incomplete (not max_tokens) -> escalate to fable.
+            text, sr = [("", "end_turn"), ("Final complete answer.", "end_turn")][len(contents) - 1]
+            return type("R", (), {"content": [type("B", (), {"text": text})()],
+                                  "usage": type("U", (), {"input_tokens": 1, "output_tokens": 2})(),
+                                  "stop_reason": sr})()
+
+    monkeypatch.setattr(router, "_client", lambda: type("C", (), {"messages": _Msgs()})())
+    out = router.run(big, tier="opus")
+    assert out == "Final complete answer."
+    assert contents[0] == "Refs 42 and 99 in scope"    # first attempt ran on the compacted text
+    assert contents[1] == big                          # escalated tier ran on the FULL original
