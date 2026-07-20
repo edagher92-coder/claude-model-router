@@ -314,6 +314,147 @@ Task:
 
 
 # --------------------------------------------------------------------------- #
+# Token-efficiency layer (added 2026-07-20; Fable-reviewed)
+# --------------------------------------------------------------------------- #
+# Cut tokens WITHOUT cutting quality (quality is the ceiling, cost the floor):
+#   1. EFFICIENCY_DIRECTIVE — steer output to be dense, never padded.
+#   2. _maybe_compact       — shrink oversized INPUT before it inflates per-call
+#      credit, gated by a hard number/URL/path-preservation check (NUMBERS RULE).
+#   3. widen-before-climb (in run()) — on a token-cap truncation, raise max_tokens
+#      and retry the SAME tier once before paying to escalate, instead of climbing
+#      the whole ladder and still returning truncated text.
+# Every lever is opt-out via env, following the "0"/"false"/"off" convention.
+EFFICIENCY_DIRECTIVE = (
+    "You are replying through an automated dispatch pipeline. Output rules:\n"
+    "- Answer directly. No preamble, no restating the task, no filler, no offers "
+    "of further help, and no closing summary that merely repeats what you already said.\n"
+    "- Use the densest correct form: tight prose, lists, or tables. Never pad.\n"
+    "- Correctness and completeness always outrank brevity. Include every required "
+    "step, number, date, name, identifier, caveat, and warning; if a complete answer "
+    "needs more length, use more length.\n"
+    "- Show working or reasoning when it is needed to reach or justify a correct "
+    "result — then show it fully. Otherwise omit it.\n"
+    "- Never truncate with \"...\", abbreviate lists the task asked for in full, or "
+    "drop requested items to save space.\n"
+    "- End with a complete final sentence or line, never a fragment."
+)
+
+COMPACT_INSTRUCTION = (
+    "Rewrite the material below to be as short as possible WITHOUT losing any "
+    "information the task needs. Hard rules:\n"
+    "1. Keep every instruction, question, and requirement VERBATIM — never summarise "
+    "the ask itself, only the material around it.\n"
+    "2. Preserve EVERY number, dollar amount, date, time, name, email address, URL, "
+    "file path, code identifier, ID, and quoted string EXACTLY as written. If in "
+    "doubt, keep the original wording.\n"
+    "3. Condense only redundant, repetitive, or boilerplate prose. Deduplicate exact "
+    "repeats. Do not paraphrase technical content.\n"
+    "4. Keep code blocks, tables, and structured data intact unless whole lines are "
+    "exact duplicates.\n"
+    "5. Output ONLY the rewritten material — no commentary, no notes about what you changed.\n"
+    "If the material cannot be shortened safely, return it unchanged."
+)
+
+
+def _env_off(name: str, default: str = "1") -> bool:
+    """True when an env flag is explicitly disabled ('0'/'false'/'off')."""
+    return os.getenv(name, default).strip().lower() in {"0", "false", "off"}
+
+
+def _concise_enabled() -> bool:
+    return not _env_off("CLAUDE_ROUTER_CONCISE")
+
+
+def _compact_enabled() -> bool:
+    return not _env_off("CLAUDE_ROUTER_COMPACT")
+
+
+def _compact_threshold() -> int:
+    try:
+        return int(os.getenv("CLAUDE_ROUTER_COMPACT_THRESHOLD", "8000"))
+    except ValueError:
+        return 8000
+
+
+def _est_tokens(text: str) -> int:
+    """Cheap token estimate (~chars/4). Underestimates dense code/unicode, which
+    only makes the compaction threshold more conservative — acceptable."""
+    return max(1, len(text) // 4)
+
+
+# Number-bearing / identity tokens that MUST survive compaction verbatim. Kept
+# deliberately broad: over-matching just forces more content to be preserved.
+_CRITICAL_TOKEN_RE = re.compile(
+    r"\$?\d[\d,.:/-]*\d?"        # amounts, dates, versions, times, ids (1,234.50 / 2026-07-20 / v21.0)
+    r"|https?://\S+"            # urls
+    r"|[\w.+-]+@[\w.-]+\.\w+"    # emails
+    r"|[\w.-]+/[\w./-]+",        # file-path-shaped tokens
+    re.IGNORECASE,
+)
+
+
+def _critical_tokens(text: str) -> set:
+    return set(_CRITICAL_TOKEN_RE.findall(text))
+
+
+def _compaction_safe(original: str, compacted: str) -> bool:
+    """Compacted text is usable ONLY if it is meaningfully shorter AND every unique
+    number/url/path/email token from the original still appears. Set-based, so
+    legitimate deduplication of repeats passes but a dropped figure fails — this
+    makes the NUMBERS RULE a hard check, not a promise the compactor might break."""
+    if not compacted or len(compacted) > 0.85 * len(original):
+        return False
+    return not (_critical_tokens(original) - _critical_tokens(compacted))
+
+
+def _compact_call(text: str, claude_ok: bool) -> Optional[str]:
+    """Low-level compaction dispatch: cheapest engine, NO recursion into run(), NO
+    efficiency directive attached. Returns compacted text, or None if the compaction
+    call itself truncated (its tail would be silently missing) or produced nothing."""
+    cap = min(max(1024, _est_tokens(text) // 2), 8192)
+    prompt = COMPACT_INSTRUCTION + "\n\n" + text
+    if claude_ok:
+        resp = _create_message({
+            "model": _model_id("haiku"),
+            "max_tokens": cap,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            return None
+        return _response_text(resp).strip()
+    out, _in_tok, _out_tok, _base, stop = _ollama_generate(_model_id("glm"), prompt, cap)
+    return None if stop == "max_tokens" else out.strip()
+
+
+def _maybe_compact(task: str, effective_stakes: bool, target_tier: str,
+                   claude_ok: bool) -> tuple[str, bool]:
+    """Shrink oversized non-stakes input before dispatch. Returns (text, was_compacted).
+    NEVER compacts a stakes task (could drop a number/date). Best-effort: any failure,
+    truncated compactor, or a compaction that fails the number check returns the
+    original unchanged. Compacts only when the target tier makes it pay off."""
+    if effective_stakes or not _compact_enabled():
+        return task, False
+    if _est_tokens(task) < _compact_threshold():
+        return task, False
+    # Pays off only for a per-token Claude tier pricier than Haiku. Haiku-for-Haiku
+    # pays input twice; GLM is flat-rate, so only compact a glm target near its window.
+    if target_tier not in {"sonnet", "opus", "fable"} and not (
+        target_tier == "glm" and _est_tokens(task) > 150_000
+    ):
+        return task, False
+    try:
+        compacted = _compact_call(task, claude_ok)
+    except Exception:
+        _log(target_tier, "compactor", "", _est_tokens(task), 0, "compact_failed")
+        return task, False
+    if compacted and _compaction_safe(task, compacted):
+        return compacted, True
+    _log(target_tier, "compactor", "", _est_tokens(task),
+         _est_tokens(compacted or ""), "compact_rejected")
+    return task, False
+
+
+# --------------------------------------------------------------------------- #
 # Engine availability
 # --------------------------------------------------------------------------- #
 def anthropic_ready() -> bool:
@@ -539,19 +680,35 @@ def run(
     if not claude_ok:
         current_tier = _reroute_offline(current_tier, effective_stakes)
     tried: set[str] = set()
+    widened: set[str] = set()
     last_text = ""
 
-    for _attempt in range(len(LADDER)):
+    # Auto-compact oversized INPUT before it inflates per-call credit. stakes is
+    # computed from the ORIGINAL text above and carried in, so compaction can never
+    # strip a keyword that would have promoted the task (NUMBERS RULE). Non-stakes
+    # only; reverts to the original on escalation (the higher tier's job is quality).
+    original_task = task
+    active_task, was_compacted = _maybe_compact(task, effective_stakes, current_tier, claude_ok)
+    if was_compacted:
+        _announce(current_tier, "input-compactor", "compact", 0.0, _est_tokens(active_task), "compacted")
+    current_max = max_tokens
+
+    for _attempt in range(3 * len(LADDER)):
         tried.add(current_tier)
         model_id = _model_id(current_tier)
         requested_effort = _effort_for(current_tier, effort)
         stop_reason: Optional[str] = None
+        # Never request more than the tier can emit; widen-before-climb raises
+        # current_max on a token-cap truncation before we pay to escalate.
+        dispatch_max = min(current_max, MODEL_REGISTRY[current_tier].max_output_tokens)
+        directive = EFFICIENCY_DIRECTIVE if _concise_enabled() else None
 
         started = time.time()
         via = "?"
         if MODEL_REGISTRY[current_tier].engine == "ollama":
             try:
-                text, input_tokens, output_tokens, used_base, stop_reason = _ollama_generate(model_id, task, max_tokens)
+                text, input_tokens, output_tokens, used_base, stop_reason = _ollama_generate(
+                    model_id, active_task, dispatch_max, system=directive)
                 via = _via_label(used_base, model_id)
             except Exception as exc:
                 # Bridge down or tag missing = infra failure, not capability:
@@ -577,9 +734,11 @@ def run(
         else:
             request: dict[str, object] = {
                 "model": model_id,
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": task}],
+                "max_tokens": dispatch_max,
+                "messages": [{"role": "user", "content": active_task}],
             }
+            if directive:
+                request["system"] = directive
             if requested_effort:
                 request["output_config"] = {"effort": requested_effort}
             try:
@@ -602,16 +761,28 @@ def run(
         last_text = text
 
         # Policy hard rule: ONE failed or incomplete response at a tier =>
-        # escalate immediately (empty/short, token-cap truncation, refusal).
+        # escalate — EXCEPT a token-cap truncation, which first gets one
+        # bigger-budget retry at the SAME tier (widen-before-climb). A long
+        # answer must not climb the whole ladder returning truncated text.
         if _is_incomplete(text, stop_reason):
-            status = "escalated" if _next_tier_up(current_tier, tried, effective_stakes, claude_ok) else "incomplete_at_top"
+            cap = MODEL_REGISTRY[current_tier].max_output_tokens
+            if stop_reason == "max_tokens" and current_tier not in widened and dispatch_max < cap:
+                widened.add(current_tier)
+                current_max = min(max(current_max, dispatch_max) * 4, cap)
+                _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
+                     "widened", via=via)
+                _announce(current_tier, model_id, via, time.time() - started, output_tokens, "widened")
+                continue  # retry SAME tier with a bigger budget
             next_tier = _next_tier_up(current_tier, tried, effective_stakes, claude_ok)
+            status = "escalated" if next_tier else "incomplete_at_top"
             _log(current_tier, model_id, requested_effort or "", input_tokens, output_tokens,
                  status, via=via)
             _write_routing_status(current_tier, model_id, via)
             _announce(current_tier, model_id, via, time.time() - started, output_tokens, status)
             if next_tier is None:
                 return text  # top of ladder: surface what we have, honestly logged
+            if was_compacted:
+                active_task = original_task  # the escalated tier runs on the full original
             current_tier = next_tier
             continue
 
@@ -701,6 +872,11 @@ def doctor() -> dict:
         else:
             alloc_detail = f"'{glm_tag}' registry default (no bench report / auto-allocate off)"
     rows.append({"check": "glm allocation", "ok": True, "detail": alloc_detail, "fix": ""})
+
+    eff = ("output directive ON" if _concise_enabled() else "output directive OFF (CLAUDE_ROUTER_CONCISE)")
+    cmp_ = ("input auto-compact ON, threshold "
+            f"{_compact_threshold()} tok" if _compact_enabled() else "input auto-compact OFF (CLAUDE_ROUTER_COMPACT)")
+    rows.append({"check": "token efficiency", "ok": True, "detail": f"{eff}; {cmp_}", "fix": ""})
 
     if bridge_ready:
         listed = _tag_listed(bridge_base or "", bridge_key, glm_tag)
@@ -815,11 +991,14 @@ def _next_tier_up(tier: str, tried: set[str], stakes: bool, claude_ok: bool = Tr
     return None
 
 
-def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int, str]:
+def _ollama_generate(model_tag: str, prompt: str, max_tokens: int,
+                     system: Optional[str] = None) -> tuple[str, int, int, str]:
     """Dispatch to the first reachable base in the Ollama chain (routing
     server / local daemon first, then Ollama Cloud — see _ollama_bases).
     Returns (text, input_tokens, output_tokens, base_used) so callers can
-    surface WHERE the reply came from."""
+    surface WHERE the reply came from. `system` (when set) becomes the payload's
+    system prompt — the caller passes the efficiency directive on real dispatch
+    and nothing on the compaction call."""
     bases = _ollama_bases()
     errors: list[str] = []
     for base, api_key in bases:
@@ -827,7 +1006,7 @@ def _ollama_generate(model_tag: str, prompt: str, max_tokens: int) -> tuple[str,
             errors.append(f"{base}: unreachable")
             continue
         try:
-            text, in_tok, out_tok, done = _generate_at(base, api_key, model_tag, prompt, max_tokens)
+            text, in_tok, out_tok, done = _generate_at(base, api_key, model_tag, prompt, max_tokens, system)
             return text, in_tok, out_tok, base, done
         except Exception as exc:  # noqa: BLE001 - every base gets its shot
             errors.append(f"{base}: {exc}")
@@ -853,9 +1032,10 @@ def _dispatch_ssrf_ok(base: str) -> None:
         raise RuntimeError(f"SSRF guard: '{host}' did not resolve to a private/loopback/Tailscale IP")
 
 
-def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_tokens: int) -> tuple[str, int, int, Optional[str]]:
+def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_tokens: int,
+                 system: Optional[str] = None) -> tuple[str, int, int, Optional[str]]:
     _dispatch_ssrf_ok(base)
-    payload = json.dumps({
+    body_obj = {
         "model": model_tag,
         "prompt": prompt,
         "stream": False,
@@ -865,7 +1045,10 @@ def _generate_at(base: str, api_key: str, model_tag: str, prompt: str, max_token
         # 2026-07-17). Ignored by non-thinking models.
         "think": False,
         "options": {"num_predict": max_tokens},
-    }).encode("utf-8")
+    }
+    if system:
+        body_obj["system"] = system
+    payload = json.dumps(body_obj).encode("utf-8")
     request = urllib.request.Request(base + "/api/generate", data=payload, headers=_auth_headers(api_key))
     with urllib.request.urlopen(request, timeout=GENERATE_TIMEOUT) as response:
         body = json.loads(response.read().decode("utf-8"))
@@ -888,10 +1071,15 @@ def _classify(task: str) -> str:
             "cannot classify: ANTHROPIC_API_KEY is unset and no Ollama bridge is "
             "configured or reachable. Run `python router.py --doctor`."
         )
+    # Routing signal lives in the head of a prompt; a 5-token classification never
+    # needs the full body. Send head+tail on long tasks to save Haiku input cost.
+    # looks_like_stakes() still scans the FULL text in run(), so the NUMBERS RULE
+    # backstop is untouched by this truncation.
+    probe = task if len(task) <= 5000 else task[:4000] + "\n...\n" + task[-1000:]
     response = _client().messages.create(
         model=_model_id("haiku"),
         max_tokens=5,
-        messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(task=task)}],
+        messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(task=probe)}],
     )
     word = _response_text(response).strip().upper()
     return {
@@ -1082,7 +1270,22 @@ if __name__ == "__main__":
     parser.add_argument("--registry", action="store_true", help="print the active registry as JSON")
     parser.add_argument("--last", type=int, nargs="?", const=10, metavar="N",
                         help="show the last N dispatches (what ran WHERE) and exit")
+    parser.add_argument("--no-concise", action="store_true",
+                        help="disable the output-efficiency directive for this run")
+    parser.add_argument("--no-compact", action="store_true",
+                        help="disable auto-compaction of oversized input for this run")
+    parser.add_argument("--compact-threshold", type=int, metavar="TOK",
+                        help="input est-token threshold above which non-stakes input is compacted (default 8000)")
     args = parser.parse_args()
+
+    # CLI flags set the same env knobs the library reads, so behaviour is
+    # identical whether the router is driven from the shell or imported.
+    if args.no_concise:
+        os.environ["CLAUDE_ROUTER_CONCISE"] = "0"
+    if args.no_compact:
+        os.environ["CLAUDE_ROUTER_COMPACT"] = "0"
+    if args.compact_threshold is not None:
+        os.environ["CLAUDE_ROUTER_COMPACT_THRESHOLD"] = str(args.compact_threshold)
 
     if args.last is not None:
         rows = last_dispatches(args.last)

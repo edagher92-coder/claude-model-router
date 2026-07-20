@@ -248,3 +248,40 @@ paths, so long-lived servers pick up rotation without a restart.
   `stakes=True` refuses with `RouterSetupError` (NUMBERS RULE: customer-facing
   prices, quotes, invoices, and legal content never run on the bridge).
 - Neither engine → `RouterSetupError` pointing at `--doctor`.
+
+## Token efficiency (per-call, added 2026-07-20; Fable-reviewed)
+
+Three levers that cut tokens **without cutting quality** — quality is the
+ceiling, cost the floor. All opt-out via env, all covered by
+`tests/test_router_v51_setup.py`.
+
+1. **Output-efficiency directive** (`EFFICIENCY_DIRECTIVE`). Injected as the
+   Anthropic `system` field and the Ollama `system` field on every real
+   dispatch — never on the classifier call (5-token answer) or the compaction
+   call. It bans preamble/filler/restating/padding and mandates dense form,
+   while explicitly requiring that correctness and completeness outrank brevity
+   (every number, step, caveat kept; end on a complete line so a terse answer
+   isn't misread as truncated). Disable with `CLAUDE_ROUTER_CONCISE=0`.
+2. **Input auto-compaction** (`_maybe_compact`). Oversized **non-stakes** input
+   (est. tokens > `CLAUDE_ROUTER_COMPACT_THRESHOLD`, default 8000) is condensed
+   on the cheapest engine before dispatch — but only when the target tier makes
+   it pay (Sonnet/Opus/Fable; never Haiku-for-Haiku or flat-rate GLM unless near
+   its window). A hard check (`_compaction_safe`) discards the compaction unless
+   every number / URL / path / email from the original survives verbatim, so the
+   NUMBERS RULE is enforced, not merely requested. Stakes tasks are **never**
+   compacted; a truncated or failed compaction silently falls back to the
+   original; on escalation the higher tier runs the **full original** text.
+   Disable with `CLAUDE_ROUTER_COMPACT=0`.
+3. **Widen-before-climb.** A token-cap truncation now gets one bigger-budget
+   retry at the **same** tier (max_tokens ×4, capped at the tier's
+   `max_output_tokens`) before escalating — so a long answer no longer truncates
+   at every rung and climbs the whole ladder still truncated. Strictly raises
+   completeness; costs nothing when answers fit.
+
+`python router.py --doctor` shows the active efficiency settings. Flags:
+`--no-concise`, `--no-compact`, `--compact-threshold N`.
+
+**Complementary lever (session, not per-call):** Claude Code's own
+`autoCompactEnabled` / `autoCompactWindow` in `settings.json` compacts a live
+session's *context* before it inflates credit. That covers the running session;
+the three levers above cover each per-call dispatch the router makes.
