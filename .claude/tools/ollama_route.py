@@ -39,6 +39,8 @@ import argparse
 import json
 import ipaddress
 import os
+import re
+import socket
 import sys
 import urllib.error
 import urllib.parse
@@ -89,9 +91,99 @@ def _is_allowed_base(url: str) -> tuple[bool, str]:
     return False, f"public host '{host}' blocked (SSRF) — set CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS to permit it"
 
 
+# Static shape/scheme check at import (cheap, fails fast on an obviously bad URL).
+# The authoritative SSRF decision is re-run at DISPATCH time in _dispatch_ssrf_ok
+# below — a hostname's DNS answer can change between import and connect (rebinding),
+# so the import-time check alone is a TOCTOU hole (Kimi review).
 _base_ok, _base_reason = _is_allowed_base(BASE)
 if not _base_ok:
     raise SystemExit(f"refusing CLAUDE_ROUTER_OLLAMA_URL={BASE!r}: {_base_reason}")
+
+
+# --- NUMBERS RULE: never send customer-facing price/quote/invoice/legal work to a
+# non-Claude engine. This CLI can be invoked directly, so the guard must live here,
+# not only in the router. Duplicated from router._STAKES_HINT_RE (this tool is
+# standalone and must not import router.py).
+_STAKES_HINT_RE = re.compile(
+    r"(?i)"
+    r"\b(invoice|refund|chargeback|remittance|payable|payslip|superannuation)\b"
+    r"|\b(tax\s+invoice|purchase\s+order|payment\s+link|credit\s+card|bank\s+details|bsb|abn|gst)\b"
+    r"|\bliability\b|\bindemnif|terms\s+(?:and|&)\s+conditions|\blegal\s+(?:advice|letter|contract)\b"
+    r"|\$\s?\d"
+)
+
+
+def looks_like_stakes(*texts: str) -> bool:
+    """True when any text carries customer money/legal signal. Extra whole-word
+    terms via CLAUDE_ROUTER_STAKES_KEYWORDS (comma-separated, case-insensitive)."""
+    extra = os.environ.get("CLAUDE_ROUTER_STAKES_KEYWORDS", "").strip()
+    terms = [re.escape(t.strip()) for t in extra.split(",") if t.strip()] if extra else []
+    extra_re = re.compile(r"(?i)\b(" + "|".join(terms) + r")\b") if terms else None
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        if _STAKES_HINT_RE.search(text):
+            return True
+        if extra_re is not None and extra_re.search(text):
+            return True
+    return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects — a 30x from an allowlisted base could bounce the
+    prompt + API key to a public/metadata host, defeating the SSRF allowlist.
+    Installed process-wide so every urllib.request.urlopen here fails closed on
+    any redirect (build_opener keeps ProxyHandler, so env proxies still work)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"redirect to {newurl!r} blocked (SSRF)", headers, fp)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirect()))
+
+
+def _resolves_private(host: str) -> bool:
+    """Dispatch-time DNS guard: the hostname must currently resolve only to
+    loopback/RFC1918/Tailscale. Fail closed on resolution error or any public IP."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    saw = False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return False
+        saw = True
+        if ip.is_link_local:
+            return False
+        if ip.is_loopback or ip.is_private or ip in ipaddress.ip_network("100.64.0.0/10"):
+            continue
+        return False
+    return saw
+
+
+def _dispatch_ssrf_ok() -> None:
+    """Re-validate BASE at the moment of dispatch (closes the import-time TOCTOU).
+    IP literals were range-checked in _is_allowed_base; ollama.com and explicitly
+    allowlisted hosts are intentional public targets; every other hostname must
+    resolve to a private/loopback/Tailscale IP right now."""
+    ok, reason = _is_allowed_base(BASE)
+    if not ok:
+        raise RuntimeError(f"refusing Ollama base {BASE!r}: {reason}")
+    host = (urllib.parse.urlparse(BASE).hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return  # IP literal already validated
+    except ValueError:
+        pass
+    extra = {h.strip().lower() for h in os.environ.get("CLAUDE_ROUTER_OLLAMA_ALLOW_HOSTS", "").split(",") if h.strip()}
+    if host == "ollama.com" or host in extra:
+        return
+    if not _resolves_private(host):
+        raise RuntimeError(f"SSRF guard: '{host}' did not resolve to a private/loopback/Tailscale IP")
 
 
 def _headers() -> dict:
@@ -111,12 +203,14 @@ ROUTES = {
 
 
 def _get(path: str, timeout: int):
+    _dispatch_ssrf_ok()
     req = urllib.request.Request(BASE + path, headers=_headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
 def _post(path: str, payload: dict, timeout: int):
+    _dispatch_ssrf_ok()
     req = urllib.request.Request(
         BASE + path,
         data=json.dumps(payload).encode(),
@@ -196,6 +290,13 @@ def main() -> int:
     prompt = " ".join(a.prompt).strip() or sys.stdin.read().strip()
     if not prompt:
         p.error("no prompt (pass as args or pipe via stdin)")
+
+    # NUMBERS RULE — refuse stakes-looking work before it ever leaves for Ollama.
+    if looks_like_stakes(prompt, a.system or ""):
+        print("error: NUMBERS RULE — refusing to send customer-facing money/legal "
+              "content to the Ollama bridge. Keep this on Claude (Sonnet/Opus).",
+              file=sys.stderr)
+        return 4
 
     try:
         resp = generate(model, prompt, a.system, a.timeout)

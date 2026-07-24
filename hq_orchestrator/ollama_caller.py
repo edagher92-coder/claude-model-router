@@ -23,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -31,6 +32,50 @@ import urllib.parse
 import urllib.request
 
 RETRY_DELAYS = (2, 4, 8, 16)
+
+
+# --- NUMBERS RULE: never dispatch customer-facing price/quote/invoice/legal work
+# to a non-Claude engine. The orchestrator's routing enforces this upstream, but a
+# direct caller (or a mis-routed task) must fail closed here too — this is the last
+# gate before the prompt leaves for Ollama. Duplicated from router._STAKES_HINT_RE
+# (stdlib-only package; must not import router.py).
+_STAKES_HINT_RE = re.compile(
+    r"(?i)"
+    r"\b(invoice|refund|chargeback|remittance|payable|payslip|superannuation)\b"
+    r"|\b(tax\s+invoice|purchase\s+order|payment\s+link|credit\s+card|bank\s+details|bsb|abn|gst)\b"
+    r"|\bliability\b|\bindemnif|terms\s+(?:and|&)\s+conditions|\blegal\s+(?:advice|letter|contract)\b"
+    r"|\$\s?\d"
+)
+
+
+def looks_like_stakes(*texts: str) -> bool:
+    """True when any text carries customer money/legal signal. Extra whole-word
+    terms via CLAUDE_ROUTER_STAKES_KEYWORDS (comma-separated, case-insensitive)."""
+    extra = os.getenv("CLAUDE_ROUTER_STAKES_KEYWORDS", "").strip()
+    terms = [re.escape(t.strip()) for t in extra.split(",") if t.strip()] if extra else []
+    extra_re = re.compile(r"(?i)\b(" + "|".join(terms) + r")\b") if terms else None
+    for text in texts:
+        if not isinstance(text, str):
+            continue
+        if _STAKES_HINT_RE.search(text):
+            return True
+        if extra_re is not None and extra_re.search(text):
+            return True
+    return False
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse HTTP redirects — a 30x from an allowlisted base could bounce the
+    prompt + API key to a public/metadata host, defeating the SSRF allowlist.
+    Installed process-wide so every urllib.request.urlopen here fails closed on
+    any redirect (build_opener keeps ProxyHandler, so env proxies still work)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"redirect to {newurl!r} blocked (SSRF)", headers, fp)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_NoRedirect()))
 
 # envelope tag -> default Ollama model tag (env override read at call time)
 _DEFAULT_TAGS = {
@@ -180,6 +225,11 @@ def is_ollama_model(model: str) -> bool:
 
 def call(model: str, system: str, message: str, submit_tool: dict, timeout: int = 600) -> dict:
     """Match the ModelCaller signature used by core.delegate."""
+    if looks_like_stakes(message, system):
+        raise RuntimeError(
+            "NUMBERS RULE: refusing to dispatch customer-facing money/legal content "
+            f"to the Ollama bridge (model '{model}'). Route this to claude-sonnet-5/"
+            "claude-opus-4-8 instead.")
     tag = _tag(model)
     payload = json.dumps({
         "model": tag,
