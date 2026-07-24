@@ -77,21 +77,25 @@ Baseline mapping (see the latest report for current truth):
 
 | Work | First choice | Notes |
 |---|---|---|
-| Long summaries, digests, first drafts | bench winner (2026-07-17: **GLM 5.2**) | free quota-wise; never final authority |
+| glm-tier auto-allocation (bench winner) | 2026-07-24: **gemma4:31b** | fastest clean sweep incl. deep-reason/price-honesty/tier-math; auto-picked |
+| Long summaries, digests, first drafts | the current bench winner | free quota-wise; never final authority |
 | Bulk non-stakes code drafts | kimi-k2.7-code | clean sweep incl. tier-math; code specialist |
 | Most coding, reviews, agentic steps | Sonnet 5 | the workhorse |
 | Mechanical extract/reformat | Haiku 4.5 | fast + cheap |
 | Architecture, security, hard debugging | Opus 4.8 | also the sub-manager tier |
 | Plan, synthesis, final judgement | Fable 5 | the session itself |
 
-Measured caveats from the 2026-07-17 run (re-check weekly):
-- **nemotron-3-nano:30b answered "1" on tier-math — it rounds DOWN** (would
-  underquote). Mechanical transforms only; never near quoting logic.
-- **deepseek-v4-pro / mistral-large-3:675b** got the maths right but ignored
-  "answer with just the number" until token-capped — weak instruction-following
-  disqualifies them from structured-envelope pipeline work for now.
-- **qwen3.5:397b** — fastest overall but returned one empty reply (21s stall);
-  watch flakiness before promoting it.
+Live fleet: **18 models** on Ollama Cloud as of 2026-07-24 (no additions since
+2026-07-17; **Kimi K3 Max** expected ~2026-07-27 — `--discover` will catch it).
+
+Measured caveats from the 2026-07-24 run (re-check weekly):
+- **nemotron-3-nano:30b, deepseek-v4-flash/pro, kimi-k2.6 fail tier-math** — they
+  round DOWN (would underquote). Mechanical transforms only; never near quoting.
+- **nemotron-3-super** regressed to failing **code + tier-math** (was clean on
+  2026-07-17) — dropped from the clean-sweep set; don't route code/quoting to it.
+- **minimax-m2.5 now fails price-honesty** (invented a figure) — keep it away from
+  anything customer-facing, even non-stakes; **minimax-m2.7** fails summarise+code.
+- **qwen3.5:397b** — historically flaky (an empty reply / stall); watch before promoting.
 
 ## Cadence
 
