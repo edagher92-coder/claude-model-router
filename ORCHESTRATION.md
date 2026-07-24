@@ -7,10 +7,14 @@ single-task tier choice); this document governs **multi-model runs**.
 
 ```
 Elie
- └─ FABLE 5 — lead orchestrator (the session)
+ └─ LEAD — the session's pinned model (OPUS 5 by default; FABLE 5 when selected)
+     · the ROLE belongs to the session, not to one model
      · owns the plan, the acceptance checks, and the final synthesis
-     · never does bulk work itself; it decomposes and dispatches
-     └─ OPUS 5   — sub-manager for each deep-tech workstream
+     · never does bulk work itself; it decomposes and dispatches — DOWN the
+       ladder when a cheaper tier is capable, UP to FABLE 5 when a slice
+       demands frontier reasoning or a verified attempt failed
+     └─ OPUS 5   — sub-manager for each deep-tech workstream (when Opus 5
+         IS the lead it sub-manages its own workstreams directly)
          · takes one hard slice (architecture, gnarly debugging, security)
          · does the genuinely hard parts itself
          · decomposes the rest into child tasks, routed CHEAPEST-FIRST:
