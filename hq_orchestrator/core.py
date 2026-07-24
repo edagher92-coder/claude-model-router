@@ -119,7 +119,7 @@ ORCHESTRATOR_NOTE = (
     "assigned_model, task_type, acceptance_checks, and stakes. Route every child "
     "to the CHEAPEST capable model: glm-5.2 for heavy NON-stakes bulk "
     "(drafting/summarising/analysis), claude-sonnet-5 for normal work, "
-    "claude-haiku-4-5 for mechanical transforms, claude-opus-4-8 only for the "
+    "claude-haiku-4-5 for mechanical transforms, claude-opus-5 only for the "
     "hardest pieces. NEVER route a stakes task (money, price, quote, invoice, "
     "legal, customer-facing) to glm-5.2 — mark it stakes:true and keep it on a "
     "Claude tier. If the task is small enough to finish directly, just do it and "
@@ -128,7 +128,7 @@ ORCHESTRATOR_NOTE = (
 
 WORKER_MODELS = {
     # envelope value -> API model id (kept in step with router.py's registry)
-    "claude-opus-4-8": "claude-opus-4-8",
+    "claude-opus-5": "claude-opus-5",
     "claude-sonnet-5": "claude-sonnet-5",
     "claude-haiku-4-5": "claude-haiku-4-5-20251001",
     # GLM 5.2 via the Ollama bridge — mid-tier bulk reasoning between Sonnet
@@ -145,7 +145,7 @@ TASK_TYPES = {
 RESULT_STATUSES = {"completed", "needs_input", "failed"}
 
 CARD_FILES = {
-    "claude-opus-4-8": "opus-4-8-engineer.md",
+    "claude-opus-5": "opus-4-8-engineer.md",
     "claude-sonnet-5": "sonnet-5-developer.md",
 }
 
@@ -497,7 +497,7 @@ def orchestrate(
     results under `subtask_results`.
 
     The chain: Fable (the calling session) builds the top envelope, usually
-    assigned to claude-opus-4-8 with role='orchestrator'. Opus decomposes into
+    assigned to claude-opus-5 with role='orchestrator'. Opus decomposes into
     children routed to glm-5.2 / sonnet / haiku (rarely another opus). Every
     leaf passes the same NUMBERS-RULE-safe validation.
 

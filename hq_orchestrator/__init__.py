@@ -1,6 +1,6 @@
 """hq-orchestrator — MCP server for the tri-agent pipeline.
 
-Fable 5 orchestrates; this server dispatches task envelopes to Opus 4.8 /
+Fable 5 orchestrates; this server dispatches task envelopes to Opus 5 /
 Sonnet 5 / Haiku workers and returns validated result envelopes.
 
 Canonical envelope schemas live in edagher92-coder/.github under

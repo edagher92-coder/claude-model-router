@@ -116,7 +116,7 @@ def delegate_task(run_id: str, task_envelope: dict, timeout_seconds: int = 600) 
 @mcp.tool()
 def orchestrate_task(run_id: str, task_envelope: dict, max_depth: int = core.MAX_ORCHESTRATION_DEPTH) -> dict:
     """Two-tier delegation: dispatch a task envelope whose worker may be a
-    sub-manager (role='orchestrator', usually claude-opus-4-8). If it returns
+    sub-manager (role='orchestrator', usually claude-opus-5). If it returns
     child subtasks, they are executed cheapest-first — Claude tiers via the
     Anthropic caller, glm-5.2 via the Ollama bridge — recursively, depth-capped.
     Stakes tasks are rejected on glm-5.2 at validation (NUMBERS RULE)."""

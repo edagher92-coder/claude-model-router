@@ -11,7 +11,7 @@ This repo provides a small Python router for API traffic. A fast Haiku classifie
 | `haiku` | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` | Mechanical extraction, cleanup, formatting, high-volume subagents |
 | `sonnet` | Claude Sonnet 5 | `claude-sonnet-5` | Default coding, drafting, data analysis, tool use, and agentic work |
 | `glm` | GLM 5.2 (Ollama bridge) | `glm-5.2:cloud` | Heavy NON-stakes bulk reasoning/drafting between Sonnet and Opus; `stakes=True` skips it (NUMBERS RULE) |
-| `opus` | Claude Opus 4.8 | `claude-opus-4-8` | Complex architecture, large refactors, enterprise-quality analysis |
+| `opus` | Claude Opus 5 | `claude-opus-5` | Complex architecture, large refactors, enterprise-quality analysis |
 | `fable` | Claude Fable 5 | `claude-fable-5` | Frontier reserve for hardest reasoning and failed Opus cases |
 
 ## Quick start
@@ -99,7 +99,7 @@ Behaviour by environment (each engine degrades honestly, never silently):
 ## What changed in v5.0
 
 - Added a structured `MODEL_REGISTRY` with API IDs, labels, roles, context windows, output caps, pricing fields, and availability.
-- Updated routing tiers for Haiku 4.5, Sonnet 5, Opus 4.8, and Fable 5.
+- Updated routing tiers for Haiku 4.5, Sonnet 5, Opus 5, and Fable 5.
 - Added explicit effort control through `output_config={"effort": ...}` for supported models.
 - Added manual tier override via `run(..., tier="opus")`.
 - Added safe fallback from Fable access errors to a lower available tier.
@@ -114,7 +114,7 @@ export CLAUDE_ROUTER_LOG=router-usage.csv
 
 export CLAUDE_ROUTER_HAIKU_MODEL=claude-haiku-4-5-20251001
 export CLAUDE_ROUTER_SONNET_MODEL=claude-sonnet-5
-export CLAUDE_ROUTER_OPUS_MODEL=claude-opus-4-8
+export CLAUDE_ROUTER_OPUS_MODEL=claude-opus-5
 export CLAUDE_ROUTER_FABLE_MODEL=claude-fable-5
 
 # Ollama bridge (glm tier) — see the Setup section above
@@ -171,7 +171,7 @@ MIT licensed. Built by Elie Dagher — Snowflow NSW, Slushieco, ReGen Labs Engin
 `edagher92-coder/.github` under `orchestration/handoff/` (contract v1.0):
 Fable 5 dispatches task envelopes; this server validates them, assembles the
 worker prompt (system card + skill packs + context files + dependency
-artifacts), calls Opus 4.8 / Sonnet 5 / Haiku with a forced `submit_result`
+artifacts), calls Opus 5 / Sonnet 5 / Haiku with a forced `submit_result`
 tool so replies always parse, validates the result envelope, and persists
 everything under a runs directory.
 

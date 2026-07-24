@@ -33,9 +33,9 @@ Effort guidance:
 - `xhigh` is for hard coding/agentic tasks; if the task stays quality-critical, escalate to Opus instead of repeatedly over-prompting.
 - `max` is reserved for rare tasks that require absolute capability and have explicit budget approval.
 
-### 3. Opus 4.8 — quality-critical / enterprise tier
+### 3. Opus 5 — quality-critical / enterprise tier
 
-API ID: `claude-opus-4-8`
+API ID: `claude-opus-5`
 
 Use for:
 - Complex architecture, deep analysis, large refactors, enterprise or customer-facing output.
@@ -77,7 +77,7 @@ before moving up a tier:
 
 1. **Exhaust the current tier's effort range first.** If the current tier is still running at `low` or
    `medium` and the task is at all quality-sensitive, raise effort (`high` → `xhigh` → `max`) before
-   changing model. A Sonnet-5-at-`xhigh` result is frequently as good as an Opus-4.8-at-`high` result
+   changing model. A Sonnet-5-at-`xhigh` result is frequently as good as an Opus-5-at-`high` result
    at roughly a third of the per-token cost — jumping tiers first throws that away.
 2. **Then escalate only when one of these is true:**
    - **STAKES override — skip the ROI check entirely.** Money-moving, legal/compliance, security,
@@ -169,7 +169,7 @@ Snapshot as of 2026-07-08, per 1M tokens (input / output):
 |---|---|---|---|
 | Haiku | `claude-haiku-4-5` | $1.00 | $5.00 |
 | Sonnet | `claude-sonnet-5` | $3.00 (**$2.00 introductory, through 2026-08-31**) | $15.00 (**$10.00 introductory**) |
-| Opus | `claude-opus-4-8` | $5.00 | $25.00 |
+| Opus | `claude-opus-5` | $5.00 | $25.00 |
 | Fable | `claude-fable-5` | $10.00 | $50.00 |
 
 `MODEL_REGISTRY` in `router.py` already carries these as `input_usd_per_mtok`/`output_usd_per_mtok` —
@@ -192,7 +192,7 @@ Supported effort values: `low`, `medium`, `high`, `xhigh`, `max`.
 Default:
 - Haiku: no effort setting.
 - Sonnet 5: `high`.
-- Opus 4.8: `high`.
+- Opus 5: `high`.
 - Fable 5: `high`.
 
 Use lower effort only after evals prove quality holds. Use `xhigh` or `max` only when the task needs deeper reasoning and the budget is acceptable.
