@@ -57,7 +57,7 @@ def top_env(**over):
         "run_id": "R1",
         "task_id": "T001",
         "objective": "Ship the feature",
-        "assigned_model": "claude-opus-4-8",
+        "assigned_model": "claude-opus-5",
         "task_type": "implementation",
         "acceptance_checks": ["it works"],
         "role": "orchestrator",
@@ -119,7 +119,7 @@ def test_opus_decomposes_and_children_run_cheapest_first(cards_dir, store):
     assert "ORCHESTRATOR MODE" in seen[0][1]
     ran = {tid: model for model, _system, tid in seen}
     assert ran == {
-        "T001": "claude-opus-4-8",
+        "T001": "claude-opus-5",
         "T010": "glm-5.2",
         "T011": "claude-sonnet-5",
         "T012": "claude-haiku-4-5-20251001",  # WORKER_MODELS maps to the dated API id
@@ -138,8 +138,8 @@ def test_depth_cap_stops_runaway(cards_dir, store):
     # T001(opus) -> T010(opus orchestrator) -> T020(opus orchestrator) -> would
     # spawn T030 at depth 2, which must NOT expand.
     script = {
-        "T001": {"subtasks": [dict(child("T010", "claude-opus-4-8"), role="orchestrator")]},
-        "T010": {"subtasks": [dict(child("T020", "claude-opus-4-8"), role="orchestrator")]},
+        "T001": {"subtasks": [dict(child("T010", "claude-opus-5"), role="orchestrator")]},
+        "T010": {"subtasks": [dict(child("T020", "claude-opus-5"), role="orchestrator")]},
         "T020": {"subtasks": [child("T030", "glm-5.2")]},
         "T030": {"summary": "should never run"},
     }
@@ -200,7 +200,7 @@ def test_stakes_keyword_backstop_catches_forgotten_flag():
 def test_worker_returned_subtasks_are_refused(cards_dir, store):
     # A leaf (e.g. the open-weight bridge) trying to spawn work is refused.
     seen = []
-    script = {"T001": {"subtasks": [child("T010", "claude-opus-4-8", "spawn expensive work")]}}
+    script = {"T001": {"subtasks": [child("T010", "claude-opus-5", "spawn expensive work")]}}
     caller_for = make_caller_for(script, seen)
 
     result = core.orchestrate(top_env(role="worker"), caller_for, store, cards_dir=cards_dir)

@@ -18,7 +18,7 @@ def test_registry_contains_current_tiers(monkeypatch):
     assert data["haiku"]["active_api_id"] == "claude-haiku-4-5-20251001"
     assert data["sonnet"]["active_api_id"] == "claude-sonnet-5"
     assert data["glm"]["active_api_id"] == "glm-5.2:cloud"
-    assert data["opus"]["active_api_id"] == "claude-opus-4-8"
+    assert data["opus"]["active_api_id"] == "claude-opus-5"
     assert data["fable"]["active_api_id"] == "claude-fable-5"
 
 

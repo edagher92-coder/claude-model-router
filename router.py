@@ -8,7 +8,7 @@ lineup across two engines (Anthropic API + the Ollama bridge):
   reasoning/drafting — protects Claude quota. NUMBERS RULE: never routes
   customer-facing price/quote/invoice/legal work; pass stakes=True to keep
   a task on Claude tiers entirely.
-- Claude Opus 4.8 for complex agentic coding and enterprise-quality work.
+- Claude Opus 5 for complex agentic coding and enterprise-quality work.
 - Claude Fable 5 as the frontier reserve tier.
 
 Engines and how they resolve (the v5.1 setup contract):
@@ -254,8 +254,8 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         engine="ollama",
     ),
     "opus": ModelInfo(
-        api_id="claude-opus-4-8",
-        label="Claude Opus 4.8",
+        api_id="claude-opus-5",
+        label="Claude Opus 5",
         role="Complex agentic coding, architecture, enterprise-quality analysis, large refactors, high-accuracy work.",
         context_window="1M",
         max_output_tokens=128_000,

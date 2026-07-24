@@ -10,7 +10,7 @@ Elie
  └─ FABLE 5 — lead orchestrator (the session)
      · owns the plan, the acceptance checks, and the final synthesis
      · never does bulk work itself; it decomposes and dispatches
-     └─ OPUS 4.8 — sub-manager for each deep-tech workstream
+     └─ OPUS 5   — sub-manager for each deep-tech workstream
          · takes one hard slice (architecture, gnarly debugging, security)
          · does the genuinely hard parts itself
          · decomposes the rest into child tasks, routed CHEAPEST-FIRST:
@@ -28,7 +28,7 @@ Two ways to run it:
    (`run(task, tier="glm")`). Use the `/orchestrate` skill.
 2. **Server (durable, resumable):** `hq_orchestrator` runs on a PC with the
    API key. Fable dispatches a task envelope with `role: "orchestrator"`
-   assigned to `claude-opus-4-8`; `core.orchestrate()` executes the returned
+   assigned to `claude-opus-5`; `core.orchestrate()` executes the returned
    child envelopes recursively, persisting every envelope/artifact to disk.
    Depth-capped at `MAX_ORCHESTRATION_DEPTH` (2) as a runaway backstop.
 
@@ -82,7 +82,7 @@ Baseline mapping (see the latest report for current truth):
 | Bulk non-stakes code drafts | kimi-k2.7-code | clean sweep incl. tier-math; code specialist |
 | Most coding, reviews, agentic steps | Sonnet 5 | the workhorse |
 | Mechanical extract/reformat | Haiku 4.5 | fast + cheap |
-| Architecture, security, hard debugging | Opus 4.8 | also the sub-manager tier |
+| Architecture, security, hard debugging | Opus 5 | also the sub-manager tier |
 | Plan, synthesis, final judgement | Fable 5 | the session itself |
 
 Live fleet: **18 models** on Ollama Cloud as of 2026-07-24 (no additions since
