@@ -25,9 +25,16 @@ import urllib.error
 import urllib.request
 
 HERE = pathlib.Path(__file__).parent
+# The live Ollama Cloud fleet as of 2026-07-24 (verified by that day's bench
+# report). `--discover` supersedes this list by querying /api/tags at runtime,
+# so a new model (e.g. Kimi K3 Max, expected ~2026-07-27) is benched the first
+# run after it lands with no edit here — this static list is only the fallback
+# for a bench run without --discover.
 DEFAULT_MODELS = [
-    "glm-5.2", "gpt-oss:120b", "qwen3.5:397b", "kimi-k2.7-code",
-    "nemotron-3-nano:30b", "deepseek-v4-pro", "mistral-large-3:675b",
+    "glm-5.2", "glm-5.1", "gpt-oss:120b", "gpt-oss:20b", "qwen3.5:397b",
+    "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "minimax-m3", "minimax-m2.7",
+    "minimax-m2.5", "nemotron-3-ultra", "nemotron-3-super", "nemotron-3-nano:30b",
+    "deepseek-v4-pro", "deepseek-v4-flash", "mistral-large-3:675b", "gemma4:31b",
 ]
 # Claude baselines run head-to-head on the identical probes whenever
 # ANTHROPIC_API_KEY is present (skipped cleanly otherwise). This is what turns
