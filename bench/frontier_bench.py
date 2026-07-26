@@ -67,12 +67,42 @@ def call_anthropic(model: str, prompt: str, key: str) -> tuple[str, int, int]:
     return text, int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
 
 
+def _openai_text_from_responses(body: dict) -> str:
+    """Pull the assistant text out of a Responses API payload.
+
+    Prefers the flattened `output_text`; otherwise walks output[].content[] and
+    keeps only output_text parts, so reasoning summaries never leak into the
+    answer we grade.
+    """
+    if isinstance(body.get("output_text"), str) and body["output_text"].strip():
+        return body["output_text"]
+    parts: list[str] = []
+    for item in body.get("output") or []:
+        for chunk in item.get("content") or []:
+            if chunk.get("type") in ("output_text", "text") and chunk.get("text"):
+                parts.append(chunk["text"])
+    return "".join(parts)
+
+
 def call_openai(model: str, prompt: str, key: str) -> tuple[str, int, int]:
-    # max_completion_tokens (not max_tokens) — required by reasoning-tier models;
-    # generous cap so hidden reasoning can't starve the visible answer.
+    """GPT-5.6 family via the Responses API (its canonical path), falling back
+    to chat/completions for older IDs that predate it."""
+    headers = {"Authorization": f"Bearer {key}"}
+    try:
+        body = _post(
+            "https://api.openai.com/v1/responses", headers,
+            # max_output_tokens is generous so hidden reasoning can't starve the
+            # visible answer (a reasoning model spends budget before it speaks).
+            {"model": model, "input": prompt, "max_output_tokens": 4096},
+        )
+        usage = body.get("usage", {})
+        return (_openai_text_from_responses(body),
+                int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0)))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise  # a real error (auth, rate limit, bad model) — surface it
     body = _post(
-        "https://api.openai.com/v1/chat/completions",
-        {"Authorization": f"Bearer {key}"},
+        "https://api.openai.com/v1/chat/completions", headers,
         {"model": model, "max_completion_tokens": 4096,
          "messages": [{"role": "user", "content": prompt}]},
     )
