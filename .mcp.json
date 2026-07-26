@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "hq-orchestrator": {
+      "command": "python3",
+      "args": ["-m", "hq_orchestrator.server"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PROJECT_DIR}",
+        "HQ_RUNS_DIR": "${CLAUDE_PROJECT_DIR}/.orchestrator/runs-base"
+      }
+    }
+  }
+}
