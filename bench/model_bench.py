@@ -190,6 +190,52 @@ def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, flo
     return (body.get("response") or "").strip(), latency, int(body.get("eval_count") or 0)
 
 
+# Qwen (Alibaba Model Studio) through its OpenAI-compatible endpoint. The key
+# and model names come from env/flags only — no model name is guessed here.
+QWEN_DEFAULT_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
+def _post_json(url: str, headers: dict, payload: dict) -> dict:
+    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def generate_openai_compat(base: str, api_key: str, model: str, prompt: str) -> tuple[str, float, int]:
+    """One chat-completions call on an OpenAI-compatible API (Qwen today).
+    Thinking is switched off like the Ollama path, so a thinking model does
+    not spend max_tokens on hidden reasoning; a provider that rejects the
+    switch (HTTP 400) is retried once without it."""
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
+    payload = {"model": model, "max_tokens": MAX_TOKENS,
+               "messages": [{"role": "user", "content": prompt}],
+               "enable_thinking": False}
+    start = time.time()
+    try:
+        body = _post_json(base + "/chat/completions", headers, payload)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:
+            raise
+        payload.pop("enable_thinking")
+        body = _post_json(base + "/chat/completions", headers, payload)
+    latency = time.time() - start
+    choices = body.get("choices") or [{}]
+    text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    return text, latency, int((body.get("usage") or {}).get("completion_tokens") or 0)
+
+
+def discover_openai_compat(base: str, api_key: str) -> list:
+    """Model ids an OpenAI-compatible API lists at /models. Best-effort."""
+    try:
+        req = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + api_key})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read().decode("utf-8"))
+        return [m.get("id") for m in body.get("data", []) if m.get("id")]
+    except Exception as exc:  # noqa: BLE001 - discovery is optional, never fatal
+        print(f"qwen discover: /models failed ({exc})", flush=True)
+        return []
+
+
 def discover_models(base: str, api_key: str) -> list:
     """Model names the bridge advertises via /api/tags. Lets the weekly bench
     auto-include a newly-released cloud model (e.g. Kimi K3 Max) with no code
@@ -220,7 +266,25 @@ def main() -> int:
                         help="also bench every model the bridge lists in /api/tags "
                              "(auto-picks up NEW cloud models like Kimi K3 Max the day "
                              "they land — no tag guessing, runs PC-off in CI)")
+    parser.add_argument("--qwen-models", default=os.getenv("QWEN_BENCH_MODELS", ""),
+                        help="comma list of Qwen model ids to bench via the OpenAI-compatible "
+                             "API (needs QWEN_API_KEY); empty skips Qwen")
+    parser.add_argument("--qwen-list", action="store_true",
+                        help="print the model ids the Qwen API lists, then exit")
     args = parser.parse_args()
+
+    qwen_key = os.getenv("QWEN_API_KEY", "").strip()
+    qwen_base = (os.getenv("QWEN_BASE_URL", "").strip() or QWEN_DEFAULT_BASE).rstrip("/")
+    if args.qwen_list:
+        if not qwen_key:
+            print("QWEN_API_KEY unset", flush=True)
+            return 1
+        print("\n".join(discover_openai_compat(qwen_base, qwen_key)))
+        return 0
+    qwen_models = [m.strip() for m in args.qwen_models.split(",") if m.strip()]
+    if qwen_models and not qwen_key:
+        print("note: QWEN_API_KEY unset — Qwen models skipped", flush=True)
+        qwen_models = []
 
     api_key = os.getenv("OLLAMA_API_KEY", "").strip()
     base = (args.base or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
@@ -238,13 +302,18 @@ def main() -> int:
     today = dt.date.today().isoformat()
 
     results: dict = {"date": today, "base": base, "models": {}}
-    for model in models + baselines:
+    for model in models + baselines + qwen_models:
         is_baseline = model in baselines
+        is_qwen = model in qwen_models
         row: dict = {"baseline": is_baseline} if is_baseline else {}
+        if is_qwen:
+            row["provider"] = "qwen"
         for name, (prompt, check) in probes().items():
             try:
                 if is_baseline:
                     text, latency, tokens = generate_anthropic(model, prompt)
+                elif is_qwen:
+                    text, latency, tokens = generate_openai_compat(qwen_base, qwen_key, model, prompt)
                 else:
                     text, latency, tokens = generate(base, api_key, model, prompt)
                 row[name] = {"pass": bool(check(text)), "latency_s": round(latency, 1),
@@ -285,6 +354,8 @@ def main() -> int:
                 lats.append(r["latency_s"])
         avg = f"{sum(lats) / len(lats):.1f}s" if lats else "-"
         label = f"**{model}** (baseline)" if row.get("baseline") else model
+        if row.get("provider") == "qwen":
+            label = f"{model} (Qwen API)"
         lines.append(f"| {label} | " + " | ".join(cells) + f" | {avg} |")
     (out_dir / f"{today}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nReport: {out_dir / (today + '.md')}")

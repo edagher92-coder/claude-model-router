@@ -19,6 +19,11 @@ jobs:
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           # Optional: enables the Claude Sonnet baseline head-to-head rows.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional: Qwen API rows. QWEN_BENCH_MODELS is a repo variable
+          # (comma list of model ids from `--qwen-list`); both unset = skipped.
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          QWEN_BASE_URL: ${{ vars.QWEN_BASE_URL }}
+          QWEN_BENCH_MODELS: ${{ vars.QWEN_BENCH_MODELS }}
         run: |
           pip install anthropic --quiet || true
           if [ -z "$OLLAMA_API_KEY" ]; then
