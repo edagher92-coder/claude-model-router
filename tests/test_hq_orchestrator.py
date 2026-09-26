@@ -214,3 +214,16 @@ class TestGlmWorker:
         assert ollama_caller.parse_chat_response(body) == {"status": "completed"}
         with pytest.raises(ValueError):
             ollama_caller.parse_chat_response({"message": {"content": ""}})
+
+
+def test_anthropic_client_kwargs_sends_workspace_header_only_when_set(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert core.anthropic_client_kwargs() == {}
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    assert core.anthropic_client_kwargs() == {
+        "default_headers": {"anthropic-workspace-id": "wrkspc_test"}}
+
+
+def test_server_builds_its_client_through_the_workspace_helper():
+    source = (pathlib.Path(__file__).resolve().parents[1] / "hq_orchestrator" / "server.py").read_text()
+    assert "anthropic.Anthropic(**core.anthropic_client_kwargs())" in source

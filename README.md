@@ -169,7 +169,12 @@ is missing. `[CONFIRM]`: the default base URLs for Gemini, GLM and Grok in
 `bench/model_bench.py` (`GEMINI_DEFAULT_BASE`, `GLM_DEFAULT_BASE`,
 `XAI_DEFAULT_BASE`) are plausible starting points, not verified endpoints —
 confirm the exact domain/path for the account in use (`*_BASE_URL` overrides
-the default without a code change). Elie's first Gemini candidate is
+the default without a code change). **Qwen has no default base**: its
+endpoint is account-specific, so `QWEN_BASE_URL` must be set or the Qwen rows
+are skipped with a note (never sent to a generic endpoint). In
+`model-bench.yml` every `*_BASE_URL` is read from **repository secrets only**
+— this repo is public and GitHub prints Variables unmasked in the Actions
+log. No base URL is ever printed or written into a report. Elie's first Gemini candidate is
 "Gemini 3.8 Flash"; its exact API model id is `[CONFIRM: exact Gemini 3.8
 Flash model ID]` — get it from `--gemini-list` once `GEMINI_API_KEY` exists,
 rather than typing a guessed id into `GEMINI_BENCH_MODELS`.

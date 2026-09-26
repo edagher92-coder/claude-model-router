@@ -310,3 +310,440 @@ def test_glm_provider_never_collides_with_the_ollama_glm_tier(monkeypatch, tmp_p
     assert rc == 0
     report = json.loads((tmp_path / f"{bench.dt.date.today().isoformat()}.json").read_text())
     assert "provider" not in report["models"]["glm-5.2"]
+
+
+# --------------------------------------------------------------------------- #
+# 2026-09-26 harness fixes: workspace header, transient retry, thinking
+# control, and error (inconclusive) vs FAIL on the scoreboard. None of these
+# touch a probe's pass criteria — only how the call is made and how a call
+# that never produced an answer is recorded.
+# --------------------------------------------------------------------------- #
+class _HTTP:
+    """Scripted urlopen: a list of outcomes consumed in order. An int is an
+    HTTPError with that status (optional headers via a (code, headers) tuple);
+    a dict is a JSON body. Every request is recorded."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.requests = []
+
+    def __call__(self, request, timeout=None):
+        payload = json.loads(request.data.decode("utf-8")) if request.data else None
+        self.requests.append((request.full_url, dict(request.header_items()), payload))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, tuple):
+            code, headers = outcome
+            raise urllib.error.HTTPError(request.full_url, code, "err", headers, io.BytesIO(b"{}"))
+        if isinstance(outcome, int):
+            raise urllib.error.HTTPError(request.full_url, outcome, "err", {}, io.BytesIO(b"{}"))
+        return _resp(outcome)
+
+
+def _chat(content, tokens=3, finish="stop"):
+    return {"choices": [{"message": {"content": content}, "finish_reason": finish}],
+            "usage": {"completion_tokens": tokens}}
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Patch time.sleep (not model_bench._sleep): the tests reload the module,
+    which would rebind a patched module attribute."""
+    slept = []
+    monkeypatch.setattr("time.sleep", slept.append)
+    return slept
+
+
+# --- Issue 1: Anthropic workspace header ----------------------------------- #
+def test_anthropic_workspace_header_only_when_env_set(monkeypatch):
+    bench = reload_bench()
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert bench.anthropic_client_kwargs() == {}
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "  wrkspc_test  ")
+    assert bench.anthropic_client_kwargs() == {
+        "default_headers": {"anthropic-workspace-id": "wrkspc_test"}}
+
+
+def _fake_anthropic(monkeypatch, error_text=None, reply="Carol"):
+    """Install a stub `anthropic` module; records client kwargs and calls."""
+    import types
+
+    seen = {"kwargs": [], "calls": 0}
+
+    class _Messages:
+        def create(self, **request):
+            seen["calls"] += 1
+            if error_text:
+                raise RuntimeError(error_text)
+            block = types.SimpleNamespace(text=reply)
+            return types.SimpleNamespace(content=[block],
+                                         usage=types.SimpleNamespace(output_tokens=1))
+
+    class _Client:
+        def __init__(self, **kwargs):
+            seen["kwargs"].append(kwargs)
+            self.messages = _Messages()
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=_Client))
+    return seen
+
+
+def test_generate_anthropic_sends_workspace_header(monkeypatch):
+    bench = reload_bench()
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    seen = _fake_anthropic(monkeypatch)
+    text, _, _ = bench.generate_anthropic("claude-x", "who is shortest?")
+    assert text == "Carol"
+    assert seen["kwargs"] == [{"default_headers": {"anthropic-workspace-id": "wrkspc_test"}}]
+
+
+WORKSPACE_400 = ("Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+                 "'message': 'This API key is not scoped to a workspace, so this request must "
+                 "include the anthropic-workspace-id header'}}")
+
+
+def test_workspace_400_without_header_is_a_clear_error_row_not_a_fail(monkeypatch, tmp_path, capsys):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-not-real")
+    seen = _fake_anthropic(monkeypatch, error_text=WORKSPACE_400)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "claude-x",
+                                      "--out-dir", str(tmp_path)])
+
+    assert bench.main() == 0
+    out = capsys.readouterr().out
+    assert "ANTHROPIC_WORKSPACE_ID unset" in out
+
+    today = bench.dt.date.today().isoformat()
+    row = json.loads((tmp_path / f"{today}.json").read_text())["models"]["claude-x"]
+    for name in bench.probes():
+        assert row[name]["status"] == "error"
+        assert row[name]["pass"] is None             # inconclusive, not a FAIL
+        assert row[name]["error_kind"] == "auth"
+        assert row[name]["error"] == bench.WORKSPACE_HINT
+    # A deterministic auth error is not retried on every probe.
+    assert seen["calls"] == 1
+    md = (tmp_path / f"{today}.md").read_text()
+    assert "key not scoped to a workspace; set ANTHROPIC_WORKSPACE_ID or use a workspace-scoped key" in md
+    assert "inconclusive" in md
+    assert "fake-not-real" not in md + out
+
+
+def test_workspace_400_with_header_set_says_the_header_was_rejected(monkeypatch):
+    bench = reload_bench()
+    kind, message = bench.classify_error(RuntimeError(WORKSPACE_400), workspace_set=True)
+    assert kind == "auth"
+    assert "ANTHROPIC_WORKSPACE_ID" in message and "not accepted" in message
+
+
+# --- Issue 2: transient retry + Gemini thinking ---------------------------- #
+def test_compat_retries_503_and_429_then_succeeds_honouring_retry_after(monkeypatch, no_sleep):
+    bench = reload_bench()
+    net = _HTTP([503, (429, {"Retry-After": "7"}), _chat("Carol")])
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    meta = {}
+    text, _, _ = bench.generate_openai_compat("https://example.test/v1", "k", "m", "p", meta=meta)
+    assert text == "Carol"
+    assert len(net.requests) == 3 and meta["attempts"] == 3
+    assert no_sleep[1] == 7.0                       # Retry-After honoured
+    assert 0 < no_sleep[0] <= bench.RETRY_AFTER_CAP_S
+
+
+def test_compat_retry_is_bounded_to_three_attempts(monkeypatch, no_sleep):
+    bench = reload_bench()
+    net = _HTTP([429, 429, 429, _chat("never reached")])
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    with pytest.raises(urllib.error.HTTPError) as info:
+        bench.generate_openai_compat("https://example.test/v1", "k", "m", "p")
+    assert info.value.code == 429
+    assert len(net.requests) == bench.MAX_ATTEMPTS == 3
+    assert len(no_sleep) == 2
+
+
+def test_retry_after_is_capped_and_accepts_http_dates(monkeypatch):
+    bench = reload_bench()
+    exc = urllib.error.HTTPError("u", 429, "x", {"Retry-After": "3600"}, io.BytesIO(b""))
+    assert bench._retry_after_s(exc, 1) == bench.RETRY_AFTER_CAP_S
+    future = bench.email.utils.format_datetime(
+        bench.dt.datetime.now(bench.dt.timezone.utc) + bench.dt.timedelta(seconds=5), usegmt=True)
+    exc = urllib.error.HTTPError("u", 503, "x", {"Retry-After": future}, io.BytesIO(b""))
+    assert 0 <= bench._retry_after_s(exc, 1) <= 5
+
+
+def test_non_transient_errors_are_not_retried(monkeypatch, no_sleep):
+    bench = reload_bench()
+    net = _HTTP([401])
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    with pytest.raises(urllib.error.HTTPError):
+        bench.generate_openai_compat("https://example.test/v1", "k", "m", "p", thinking_params={})
+    assert len(net.requests) == 1 and no_sleep == []
+
+
+def test_gemini_minimises_thinking_the_documented_way_with_headroom(monkeypatch, tmp_path, no_sleep):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-not-real")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.test/gemini")
+    net = FakeCompatNet({"https://example.test/gemini": {"chat": "Carol", "tokens": 1}})
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--gemini-models", "gem-x"])
+    assert bench.main() == 0
+    _, _, payload = net.requests[0]
+    assert payload["reasoning_effort"] == "low"
+    assert "enable_thinking" not in payload           # Qwen's switch is not sent to Gemini
+    assert payload["max_tokens"] == bench.MAX_TOKENS + bench.THINK_HEADROOM
+
+
+def test_qwen_keeps_its_enable_thinking_switch_and_plain_budget(monkeypatch, tmp_path):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    monkeypatch.setenv("QWEN_API_KEY", "fake-not-real")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://example.test/qwen")
+    net = FakeCompatNet({"https://example.test/qwen": {"chat": "Carol", "tokens": 1}})
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--qwen-models", "qwen-x"])
+    assert bench.main() == 0
+    _, _, payload = net.requests[0]
+    assert payload["enable_thinking"] is False
+    assert "reasoning_effort" not in payload
+    assert payload["max_tokens"] == bench.MAX_TOKENS
+
+
+def test_rejected_reasoning_effort_is_retried_once_without_it(monkeypatch, no_sleep):
+    bench = reload_bench()
+    net = _HTTP([400, _chat("ok")])
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    text, _, _ = bench.generate_openai_compat("https://example.test/v1", "k", "m", "p",
+                                              thinking_params={"reasoning_effort": "low"})
+    assert text == "ok"
+    assert "reasoning_effort" in net.requests[0][2]
+    assert "reasoning_effort" not in net.requests[1][2]
+
+
+def test_transport_errors_are_error_rows_not_fails(monkeypatch, tmp_path, no_sleep):
+    """A provider that is rate limited on every attempt of one probe is
+    recorded as ERR (inconclusive) on that probe; the probes that answered are
+    still scored normally. The model is never a clean sweep from this run."""
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-not-real")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://example.test/gemini")
+    answers = {"extract": "kim@venue.com.au\nops@slushfest.com", "reason": "Carol",
+               "price-honesty": "UNKNOWN", "tier-math": "2", "deep-reason": "5",
+               "summarise": "Clean the machine nightly. It prevents breakdowns.",
+               "code": "def is_palindrome(s):\n    t=[c.lower() for c in s if c.isalnum()]\n    return t==t[::-1]"}
+    outcomes = []
+    for name in bench.probes():
+        outcomes += [429, 503, 429] if name == "tier-math" else [_chat(answers[name])]
+    net = _HTTP(outcomes)
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--gemini-models", "gem-x"])
+    assert bench.main() == 0
+    today = bench.dt.date.today().isoformat()
+    row = json.loads((tmp_path / f"{today}.json").read_text())["models"]["gem-x"]
+    assert row["tier-math"]["status"] == "error" and row["tier-math"]["pass"] is None
+    assert row["tier-math"]["error_kind"] == "rate_limited"
+    assert bench.row_counts(row) == (6, 0, 1)
+    assert bench.row_verdict(row) == "inconclusive"
+    md = (tmp_path / f"{today}.md").read_text()
+    assert "ERR (rate_limited)" in md and "6/7 · 1 err" in md and "inconclusive" in md
+
+
+def test_empty_truncated_reply_is_a_budget_error_not_a_fail(monkeypatch, no_sleep):
+    bench = reload_bench()
+    monkeypatch.setattr(bench.urllib.request, "urlopen", _HTTP([_chat("", finish="length")]))
+    with pytest.raises(bench.BenchCallError) as info:
+        bench.generate_openai_compat("https://example.test/v1", "k", "m", "p")
+    assert info.value.kind == "budget"
+
+
+def test_verdicts_keep_fail_apart_from_inconclusive():
+    bench = reload_bench()
+    ok = {"pass": True, "status": "pass", "latency_s": 1.0}
+    bad = {"pass": False, "status": "fail", "latency_s": 1.0}
+    err = bench.error_row("unavailable", "HTTP 503")
+    legacy_err = {"pass": False, "error": "HTTP Error 410: Gone"}   # pre-fix report shape
+    names = list(bench.probes())
+    assert bench.row_verdict({n: ok for n in names}) == "clean sweep"
+    assert bench.row_verdict({**{n: ok for n in names}, names[0]: err}) == "inconclusive"
+    assert bench.row_verdict({**{n: ok for n in names}, names[0]: legacy_err}) == "inconclusive"
+    assert bench.row_verdict({**{n: ok for n in names}, names[0]: err, names[1]: bad}) == "fail"
+
+
+def test_same_day_merge_never_lets_an_outage_erase_a_scored_probe():
+    bench = reload_bench()
+    names = list(bench.probes())
+    scored = {"pass": True, "status": "pass", "latency_s": 1.0}
+    prior = {"m": {n: scored for n in names}}
+    fresh = {"m": {**{n: {"pass": False, "status": "fail", "latency_s": 2.0} for n in names},
+                   names[0]: bench.error_row("rate_limited", "HTTP 429")}}
+    merged = bench.merge_rows(prior, fresh)["m"]
+    assert merged[names[0]] == scored                 # outage kept the earlier evidence
+    assert merged[names[1]]["status"] == "fail"       # a fresh scored answer still wins
+
+
+# --- Issue 3: thinking-capable Ollama models ------------------------------- #
+def test_strip_reasoning_scores_only_the_final_answer():
+    bench = reload_bench()
+    assert bench.strip_reasoning("<think>Alice > Bob > Carol</think>\nCarol") == "Carol"
+    assert bench.strip_reasoning("The user wants the name. Alice is tallest.</think>Carol") == "Carol"
+    assert bench.strip_reasoning("  Carol  ") == "Carol"
+    assert bench.strip_reasoning("") == ""
+
+
+class _OllamaNet:
+    """Fake Ollama: /api/show returns per-model `thinking` metadata;
+    /api/generate returns a reply that LEAKS reasoning unless a think level
+    was requested (the observed glm-5.3 behaviour under think:false)."""
+
+    def __init__(self, show: dict, answer="Carol", leak="The user wants me to... Alice > Bob."):
+        self.show, self.answer, self.leak = show, answer, leak
+        self.generate_payloads = []
+
+    def __call__(self, request, timeout=None):
+        payload = json.loads(request.data.decode("utf-8"))
+        if request.full_url.endswith("/api/show"):
+            meta = self.show.get(payload["model"])
+            if meta is None:
+                raise urllib.error.HTTPError(request.full_url, 404, "nf", {}, io.BytesIO(b"{}"))
+            return _resp(meta)
+        self.generate_payloads.append(payload)
+        can_disable = False in ((self.show.get(payload["model"]) or {}).get("thinking") or {}).get("values", [False])
+        if payload["think"] is False and not can_disable:
+            return _resp({"response": self.leak + " " + self.answer, "eval_count": 40})
+        return _resp({"response": self.answer, "thinking": self.leak, "eval_count": 40})
+
+
+def test_ollama_think_level_for_models_that_cannot_disable_thinking(monkeypatch):
+    bench = reload_bench()
+    net = _OllamaNet({
+        "levels-only": {"capabilities": ["thinking"], "thinking": {"values": ["low", "high", "max"]}},
+        "can-disable": {"capabilities": ["thinking"], "thinking": {"values": [False, "high"]}},
+        "bool-think": {"capabilities": ["thinking"], "thinking": {"values": [False, True]}},
+        "no-meta": {"capabilities": ["completion"]},
+        "mid-only": {"thinking": {"values": ["medium", "high"]}},
+    })
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    base = "https://ollama.example"
+    assert bench.ollama_think_setting(base, "", "levels-only") == "low"
+    assert bench.ollama_think_setting(base, "", "can-disable") is False
+    assert bench.ollama_think_setting(base, "", "bool-think") is False
+    assert bench.ollama_think_setting(base, "", "no-meta") is False
+    assert bench.ollama_think_setting(base, "", "mid-only") == "medium"
+    assert bench.ollama_think_setting(base, "", "unknown-model") is False   # /api/show 404
+
+
+def test_ollama_generate_scores_answer_not_reasoning_for_levels_only_model(monkeypatch):
+    bench = reload_bench()
+    net = _OllamaNet({"levels-only": {"thinking": {"values": ["low", "high", "max"]}},
+                      "can-disable": {"thinking": {"values": [False, "high"]}}})
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    meta = {}
+    text, _, _ = bench.generate("https://ollama.example", "", "levels-only", "p", meta=meta)
+    assert text == "Carol"                              # reasoning trace not scored
+    assert net.generate_payloads[-1]["think"] == "low"
+    assert net.generate_payloads[-1]["options"]["num_predict"] == bench.MAX_TOKENS + bench.THINK_HEADROOM
+    assert meta["think"] == "low"
+
+    meta = {}
+    bench.generate("https://ollama.example", "", "can-disable", "p", meta=meta)
+    assert net.generate_payloads[-1]["think"] is False   # unchanged fast path
+    assert net.generate_payloads[-1]["options"]["num_predict"] == bench.MAX_TOKENS
+    assert meta["think"] is False
+
+
+def test_ollama_row_records_think_mode_and_report_notes_it(monkeypatch, tmp_path):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    net = _OllamaNet({"levels-only": {"thinking": {"values": ["low", "high"]}}}, answer="2")
+    monkeypatch.setattr(bench.urllib.request, "urlopen", net)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "levels-only", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--base", "https://ollama.example"])
+    assert bench.main() == 0
+    today = bench.dt.date.today().isoformat()
+    row = json.loads((tmp_path / f"{today}.json").read_text())["models"]["levels-only"]
+    assert row["think"] == "low"
+    assert row["tier-math"]["pass"] is True             # the answer "2", not the leaked trace
+    assert "think=`low`" in (tmp_path / f"{today}.md").read_text()
+
+
+def test_ollama_retired_model_is_one_inconclusive_reason_not_seven_fails(monkeypatch, tmp_path):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    calls = []
+
+    def gone(request, timeout=None):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 410, "Gone", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", gone)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "old-model", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--base", "https://ollama.example"])
+    assert bench.main() == 0
+    today = bench.dt.date.today().isoformat()
+    row = json.loads((tmp_path / f"{today}.json").read_text())["models"]["old-model"]
+    assert {row[n]["error_kind"] for n in bench.probes()} == {"gone"}
+    assert all(row[n]["pass"] is None for n in bench.probes())
+    assert sum(u.endswith("/api/generate") for u in calls) == 1
+
+
+# --- Endpoint privacy: Qwen base only from its secret, never published ----- #
+def test_qwen_without_base_url_is_skipped_never_sent_to_a_generic_endpoint(monkeypatch, tmp_path, capsys):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    monkeypatch.setenv("QWEN_API_KEY", "fake-not-real")          # key set, base NOT set
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--qwen-models", "qwen-x"])
+    assert bench.main() == 0                    # the autouse fixture proves no HTTP call
+    out = capsys.readouterr().out
+    assert "QWEN_BASE_URL unset" in out and "no fallback" in out
+    today = bench.dt.date.today().isoformat()
+    assert json.loads((tmp_path / f"{today}.json").read_text())["models"] == {}
+
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--qwen-list"])
+    assert bench.main() == 1
+    assert "QWEN_BASE_URL unset" in capsys.readouterr().out
+
+
+def test_no_generic_qwen_endpoint_in_source():
+    source = (pathlib.Path(__file__).resolve().parent.parent / "bench" / "model_bench.py").read_text()
+    assert "aliyuncs.com" not in source.lower()   # no hardcoded Qwen endpoint to fall back to
+
+
+def test_base_url_never_reaches_a_report_or_stdout(monkeypatch, tmp_path, capsys, no_sleep):
+    bench = reload_bench()
+    _clear_provider_env(monkeypatch, bench)
+    private = "https://private-workspace-123.example.test/compatible-mode/v1"
+    monkeypatch.setenv("QWEN_API_KEY", "fake-not-real")
+    monkeypatch.setenv("QWEN_BASE_URL", private)
+
+    def leaky(request, timeout=None):
+        raise ValueError(f"unknown url type: {request.full_url}")   # urllib-style message with URL
+
+    monkeypatch.setattr(bench.urllib.request, "urlopen", leaky)
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--models", "", "--baselines", "",
+                                      "--out-dir", str(tmp_path), "--qwen-models", "qwen-x"])
+    assert bench.main() == 0
+    today = bench.dt.date.today().isoformat()
+    blob = ((tmp_path / f"{today}.json").read_text() + (tmp_path / f"{today}.md").read_text()
+            + capsys.readouterr().out)
+    assert "private-workspace-123" not in blob
+    assert "<redacted>" in blob
+
+    monkeypatch.setattr(sys, "argv", ["model_bench.py", "--qwen-list"])
+    bench.main()
+    assert "private-workspace-123" not in capsys.readouterr().out
+
+
+def test_merge_does_not_carry_scores_from_an_older_harness():
+    bench = reload_bench()
+    names = list(bench.probes())
+    leaked_trace_fail = {"pass": False, "latency_s": 2.3, "reply_head": "The user wants me to..."}
+    prior = {"m": {n: leaked_trace_fail for n in names}, "untouched": {"x": 1}}
+    fresh = {"m": {n: bench.error_row("budget", "no answer") for n in names}}
+    merged = bench.merge_rows(prior, fresh, same_harness=False)
+    assert all(merged["m"][n]["status"] == "error" for n in names)
+    assert merged["untouched"] == {"x": 1}     # models not re-run keep their rows

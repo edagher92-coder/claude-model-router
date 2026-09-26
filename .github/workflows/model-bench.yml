@@ -37,26 +37,36 @@ jobs:
           OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
           # Optional: enables the Claude Sonnet baseline head-to-head rows.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Optional: only needed when ANTHROPIC_API_KEY is NOT scoped to a
+          # workspace (the API then 400s without an anthropic-workspace-id
+          # header). A workspace id is not a credential, so a repo variable is
+          # fine; a secret works too.
+          ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID || vars.ANTHROPIC_WORKSPACE_ID }}
           # Optional: Qwen API rows. QWEN_BENCH_MODELS is a repo variable
           # (comma list of model ids from `--qwen-list`); both unset = skipped.
+          # Every *_BASE_URL is read from SECRETS ONLY, never vars: this repo is
+          # public and GitHub prints Variables unmasked in the step's env
+          # block, so a vars fallback would publish the account's endpoint in
+          # the Actions log. Secrets are masked. QWEN_BASE_URL has no default:
+          # unset = the Qwen rows are skipped with a note.
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          QWEN_BASE_URL: ${{ secrets.QWEN_BASE_URL || vars.QWEN_BASE_URL }}
+          QWEN_BASE_URL: ${{ secrets.QWEN_BASE_URL }}
           QWEN_BENCH_MODELS: ${{ inputs.qwen_models || vars.QWEN_BENCH_MODELS }}
-          # Optional: Google Gemini rows, same pattern (key = secret, base
-          # override + model list = repo variables; unset = skipped). Get the
+          # Optional: Google Gemini rows, same pattern (key + base override =
+          # secrets, model list = repo variable; unset = skipped). Get the
           # exact model id from `--gemini-list` once GEMINI_API_KEY exists —
           # never hand-type a guessed id into GEMINI_BENCH_MODELS.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL || vars.GEMINI_BASE_URL }}
+          GEMINI_BASE_URL: ${{ secrets.GEMINI_BASE_URL }}
           GEMINI_BENCH_MODELS: ${{ inputs.gemini_models || vars.GEMINI_BENCH_MODELS }}
           # Optional: GLM (Zhipu / Z.ai) rows, same pattern.
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL || vars.GLM_BASE_URL }}
+          GLM_BASE_URL: ${{ secrets.GLM_BASE_URL }}
           GLM_BENCH_MODELS: ${{ inputs.glm_models || vars.GLM_BENCH_MODELS }}
           # Optional: xAI Grok rows, same pattern (env vars are XAI_*; the
           # CLI flags and report label say "grok").
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          XAI_BASE_URL: ${{ secrets.XAI_BASE_URL || vars.XAI_BASE_URL }}
+          XAI_BASE_URL: ${{ secrets.XAI_BASE_URL }}
           XAI_BENCH_MODELS: ${{ vars.XAI_BENCH_MODELS }}
           EVENT_NAME: ${{ github.event_name }}
           RUN_MODE: ${{ inputs.mode || 'bench' }}

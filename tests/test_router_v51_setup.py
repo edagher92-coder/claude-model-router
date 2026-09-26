@@ -453,6 +453,87 @@ def test_allocation_precedence_and_disable(monkeypatch, tmp_path):
     assert router._model_id("glm") == "glm-5.2:cloud"           # registry default
 
 
+def test_allocation_treats_error_rows_as_inconclusive(monkeypatch, tmp_path):
+    # A model the bench could not reach (429/503/auth) has no evidence: it is
+    # never allocated on that run, whether the row uses the new error shape
+    # (pass None, status "error") or the pre-2026-09-26 one (pass False +
+    # error, no latency). The next report decides afresh — no permanent strike.
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    unreachable = _probe_row([], latency=0.2)
+    unreachable["tier-math"] = {"pass": None, "status": "error", "error_kind": "rate_limited",
+                                "error": "HTTP 429"}
+    legacy = _probe_row([], latency=0.1)
+    legacy["extract"] = {"pass": False, "error": "HTTP Error 503: Service Unavailable"}
+    _write_report(reports, "2026-09-26", {
+        "fast-but-unreachable": unreachable,
+        "legacy-error": legacy,
+        "slower-but-scored": _probe_row([], latency=1.0),
+    })
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+    assert router.bench_allocation()["model"] == "slower-but-scored"
+
+    # Next week the same model is reachable and clean: it wins again.
+    _write_report(reports, "2026-10-03", {
+        "fast-but-unreachable": _probe_row([], latency=0.2),
+        "slower-but-scored": _probe_row([], latency=1.0),
+    })
+    assert router.bench_allocation()["model"] == "fast-but-unreachable"
+
+
+def test_allocation_skips_hosted_provider_and_think_level_rows(monkeypatch, tmp_path):
+    # A hosted-API row (Qwen/Gemini endpoint) is not an Ollama tag, and a row
+    # benched at a thinking LEVEL does not match the bridge's think:false call.
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    _write_report(reports, "2026-09-26", {
+        "hosted-api-model": _probe_row([], latency=0.1, provider="qwen"),
+        "levels-only-thinker": _probe_row([], latency=0.2, think="low"),
+        "bridge-model": _probe_row([], latency=1.0),
+    })
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+    assert router.bench_allocation()["model"] == "bridge-model"
+
+
+def test_allocation_ignores_frontier_reports(monkeypatch, tmp_path):
+    # frontier-YYYY-MM-DD.json sorts after every dated report ("f" > "2");
+    # allocation must read the latest DATED weekly report only.
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")
+    reports = tmp_path / "reports"
+    _write_report(reports, "2026-09-26", {"dated-winner": _probe_row([], latency=1.0)})
+    (reports / "frontier-2026-09-27.json").write_text(json.dumps(
+        {"date": "2026-09-27", "models": {"frontier-row": _probe_row([], latency=0.1)}}))
+    monkeypatch.setattr(router, "BENCH_REPORTS_DIR", reports)
+    assert router.bench_allocation()["model"] == "dated-winner"
+
+
+def test_anthropic_workspace_header_is_optional(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert router._anthropic_client_kwargs() == {}
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    assert router._anthropic_client_kwargs() == {
+        "default_headers": {"anthropic-workspace-id": "wrkspc_test"}}
+
+
+def test_router_client_is_built_with_the_workspace_header(monkeypatch, tmp_path):
+    router = load_router(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    seen = []
+
+    class _Fake:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(router, "anthropic", type("m", (), {"Anthropic": _Fake}))
+    monkeypatch.setattr(router, "_CLIENT", None)
+    router._client()
+    assert seen == [{"default_headers": {"anthropic-workspace-id": "wrkspc_test"}}]
+
+
 def test_allocation_none_without_report_or_qualifier(monkeypatch, tmp_path):
     router = load_router(monkeypatch, tmp_path)
     monkeypatch.setenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1")

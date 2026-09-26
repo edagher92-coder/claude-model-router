@@ -42,9 +42,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import email.utils
 import json
 import os
 import pathlib
+import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -68,6 +71,34 @@ DEFAULT_MODELS = [
 DEFAULT_BASELINES = ["claude-sonnet-5"]
 MAX_TOKENS = 300
 TIMEOUT = 180
+# Extra output budget for a model whose thinking CANNOT be switched off (an
+# Ollama model whose /api/show `thinking.values` has no `false`, e.g. glm-5.3
+# or gpt-oss; Gemini 3.x, where Google documents that reasoning cannot be
+# turned off and max_output_tokens INCLUDES thought tokens). Without it the
+# hidden reasoning eats the 300-token answer budget and the probe scores a
+# truncated stub or a leaked reasoning trace — a harness artefact, not a
+# verdict. Only the final answer (never the reasoning) is scored either way.
+THINK_HEADROOM = 2048
+
+# Transient transport failures that get a bounded retry: 429 (rate limit) and
+# 503 (overloaded), plus the other two gateway-flavoured 5xx. At most
+# MAX_ATTEMPTS calls in total per probe; a Retry-After header is honoured
+# (capped so one probe cannot stall the whole CI job).
+RETRY_STATUSES = {429, 502, 503, 504}
+MAX_ATTEMPTS = 3
+BACKOFF_BASE_S = 2.0
+RETRY_AFTER_CAP_S = 30.0
+def _sleep(seconds: float) -> None:  # indirection so tests never really sleep
+    time.sleep(seconds)
+
+# Bumped when the way probes are CALLED changes (not the pass criteria).
+# 2 = 2026-09-26: think levels for models that cannot switch thinking off,
+# Gemini reasoning_effort + headroom, bounded transient retry, error rows.
+HARNESS_VERSION = 2
+
+WORKSPACE_ERROR_MARKER = "not scoped to a workspace"
+WORKSPACE_HINT = ("key not scoped to a workspace; set ANTHROPIC_WORKSPACE_ID "
+                  "or use a workspace-scoped key")
 
 SUMMARY_TEXT = (
     "Commercial slushy machines need a nightly strip-clean during trading periods. "
@@ -181,11 +212,31 @@ def probes() -> dict:
     }
 
 
+class BenchCallError(Exception):
+    """A probe call that produced no scoreable answer for a harness/transport
+    reason (unreachable, rate limited, auth, token budget) — recorded as an
+    inconclusive `error` row, never as a model FAIL."""
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+
+
+def anthropic_client_kwargs() -> dict:
+    """Extra Anthropic client kwargs from the environment. An API key that is
+    not scoped to a workspace must send `anthropic-workspace-id` on every
+    request (the 2026-09-26 bench got a 400 on every baseline probe without
+    it); ANTHROPIC_WORKSPACE_ID is optional and only sent when set. The value
+    is an id, not a secret, but it is still never printed."""
+    workspace = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+    return {"default_headers": {"anthropic-workspace-id": workspace}} if workspace else {}
+
+
 def generate_anthropic(model: str, prompt: str) -> tuple[str, float, int]:
     """Claude baseline call on the identical probe. Requires the anthropic
     package + ANTHROPIC_API_KEY; callers skip baselines when unavailable."""
     import anthropic
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(**anthropic_client_kwargs())
     start = time.time()
     response = client.messages.create(
         model=model, max_tokens=MAX_TOKENS,
@@ -196,35 +247,100 @@ def generate_anthropic(model: str, prompt: str) -> tuple[str, float, int]:
     return text, latency, int(getattr(response.usage, "output_tokens", 0))
 
 
-def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, float, int]:
-    payload = json.dumps({
-        "model": model, "prompt": prompt, "stream": False,
-        # think:false — thinking models otherwise burn the whole num_predict
-        # budget on hidden reasoning and return an empty `response` (observed
-        # live with glm-5.2 and qwen3.5 on 2026-07-17). Ignored by non-thinkers.
-        "think": False,
-        "options": {"num_predict": MAX_TOKENS},
-    }).encode("utf-8")
+_THINK_BLOCK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.IGNORECASE | re.DOTALL)
+_THINK_CLOSE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Only the final answer is ever scored. Drops inline `<think>...</think>`
+    blocks and, when a model's template opened the block in the prompt so the
+    reply carries only the closing tag, everything up to the last `</think>`.
+    A reply with no reasoning markers is returned unchanged (stripped)."""
+    text = _THINK_BLOCK.sub("", text or "")
+    closers = list(_THINK_CLOSE.finditer(text))
+    if closers:
+        text = text[closers[-1].end():]
+    return text.strip()
+
+
+_THINK_CACHE: dict = {}
+
+
+def ollama_think_setting(base: str, api_key: str, model: str):
+    """The `think` value to send for one Ollama model, from its own /api/show
+    metadata (cached per base+model):
+
+      - `thinking.values` lists `false` (glm-5.2, kimi-k3, gemma4, ...), or the
+        model is not a thinker, or the metadata is missing/unreadable
+        -> False: thinking off, exactly the pre-2026-09-26 behaviour;
+      - `thinking.values` has NO `false` (glm-5.3, glm-5.3-flash, gpt-oss:
+        levels only) -> the lowest level ("low" when offered). Such a model
+        ignores think:false and, observed 2026-09-26 on glm-5.3, pours its
+        reasoning trace into `response`; asking for a level routes the trace
+        into the separate `thinking` field so only the answer is scored.
+    Generic: no model name is special-cased here."""
+    cache_key = (base, model)
+    if cache_key in _THINK_CACHE:
+        return _THINK_CACHE[cache_key]
+    setting = False
+    try:
+        body, _, _ = _post_json_with_retry(base + "/api/show", _ollama_headers(api_key),
+                                           {"model": model}, attempts=1)
+        values = (body.get("thinking") or {}).get("values")
+        if isinstance(values, list) and values and False not in values:
+            levels = [v for v in values if isinstance(v, str)]
+            if levels:
+                setting = "low" if "low" in levels else levels[0]
+    except Exception:  # noqa: BLE001 - metadata is best-effort; default to think:false
+        setting = False
+    _THINK_CACHE[cache_key] = setting
+    return setting
+
+
+def _ollama_headers(api_key: str) -> dict:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
-    request = urllib.request.Request(base + "/api/generate", data=payload, headers=headers)
-    start = time.time()
-    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    latency = time.time() - start
-    return (body.get("response") or "").strip(), latency, int(body.get("eval_count") or 0)
+    return headers
+
+
+def generate(base: str, api_key: str, model: str, prompt: str,
+             meta: dict | None = None) -> tuple[str, float, int]:
+    """One Ollama /api/generate call. `meta` (optional, filled in place)
+    records the think mode used and whether the reply hit the token cap."""
+    think = ollama_think_setting(base, api_key, model)
+    budget = MAX_TOKENS + (THINK_HEADROOM if think else 0)
+    payload = {
+        "model": model, "prompt": prompt, "stream": False,
+        # think:false — thinking models otherwise burn the whole num_predict
+        # budget on hidden reasoning and return an empty `response` (observed
+        # live with glm-5.2 and qwen3.5 on 2026-07-17). A model that cannot
+        # switch thinking off gets its lowest level instead (see
+        # ollama_think_setting); its `thinking` field is never scored.
+        "think": think,
+        "options": {"num_predict": budget},
+    }
+    body, latency, attempts = _post_json_with_retry(base + "/api/generate", _ollama_headers(api_key), payload)
+    truncated = body.get("done_reason") == "length"
+    text = strip_reasoning(body.get("response") or "")
+    if meta is not None:
+        meta.update({"think": think, "truncated": truncated, "attempts": attempts})
+    if not text and truncated:
+        raise BenchCallError("budget", f"no answer within {budget} tokens (reasoning used the budget)")
+    return text, latency, int(body.get("eval_count") or 0)
 
 
 # Hosted providers benched through the OpenAI-compatible adapter below. Every
 # key, base URL override and model list comes from env/CLI only — no model id
-# is ever guessed here. Qwen's base is the one endpoint actually verified live
-# (see the Sep-2026 Qwen bench); the other three are plausible starting points
-# that have NOT been confirmed against the account in use, so they carry an
-# explicit [CONFIRM] — a wrong path/domain fails loudly (that provider's rows
-# error out) rather than silently, but it should still be checked before the
-# provider is offered to a client.
-QWEN_DEFAULT_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# is ever guessed here. Qwen has NO default base on purpose: its endpoint is
+# account/workspace-specific and must never be published, so it comes only
+# from the QWEN_BASE_URL secret — unset means the Qwen rows are skipped with a
+# note, never sent to a generic endpoint. The other three defaults are the
+# providers' public endpoints, plausible starting points that have NOT been
+# confirmed against the account in use, so they carry an explicit [CONFIRM] —
+# a wrong path/domain fails loudly (that provider's rows error out) rather
+# than silently, but it should still be checked before the provider is
+# offered to a client. No base URL is ever printed or written to a report.
 # Google's documented OpenAI-compatibility endpoint for the Gemini API.
 GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"  # [CONFIRM]
 # Zhipu's mainland OpenAI-compatible v4 endpoint. The international Z.ai
@@ -247,16 +363,35 @@ class CompatProvider:
     label: str          # shown in the markdown report, e.g. "Qwen API"
     key_env: str        # required API key env var
     base_env: str       # optional base-URL override env var
-    default_base: str   # fallback base URL (see the [CONFIRM] constants above)
+    default_base: str   # fallback base URL ("" = none: base_env is required)
     models_env: str     # env var holding a comma list of model ids to bench
     flag: str           # CLI flag prefix -> --<flag>-models / --<flag>-list
+    # How this provider is asked to minimise thinking on chat/completions.
+    # Default is Qwen/DashScope's `enable_thinking: false` (the original
+    # behaviour). A provider that rejects the field with HTTP 400 is retried
+    # once without it.
+    thinking_params: tuple = (("enable_thinking", False),)
+    # Extra max_tokens for a provider whose thinking cannot be switched off and
+    # whose max_tokens includes the thought tokens (see THINK_HEADROOM).
+    thinking_headroom: int = 0
+    # True: no fallback — the provider is skipped unless base_env is set.
+    base_required: bool = False
 
 
 COMPAT_PROVIDERS: list[CompatProvider] = [
     CompatProvider("qwen", "Qwen API", "QWEN_API_KEY", "QWEN_BASE_URL",
-                    QWEN_DEFAULT_BASE, "QWEN_BENCH_MODELS", "qwen"),
+                    "", "QWEN_BENCH_MODELS", "qwen", base_required=True),
+    # Gemini: Google's OpenAI-compat docs map `reasoning_effort` onto
+    # thinking_level (3.x) / thinking_budget (2.5), state reasoning cannot be
+    # turned off for 3.x models ("none" exists for 2.5 non-Pro only), and
+    # count thought tokens inside max_output_tokens. "low" is the lowest level
+    # documented for every current Gemini model, so send that and add the
+    # thinking headroom — the 2026-09-26 run's 9-11-token replies were the
+    # default thinking level eating the whole 300-token budget.
     CompatProvider("gemini", "Gemini API", "GEMINI_API_KEY", "GEMINI_BASE_URL",
-                    GEMINI_DEFAULT_BASE, "GEMINI_BENCH_MODELS", "gemini"),
+                    GEMINI_DEFAULT_BASE, "GEMINI_BENCH_MODELS", "gemini",
+                    thinking_params=(("reasoning_effort", "low"),),
+                    thinking_headroom=THINK_HEADROOM),
     CompatProvider("glm", "GLM API (Zhipu/Z.ai)", "GLM_API_KEY", "GLM_BASE_URL",
                     GLM_DEFAULT_BASE, "GLM_BENCH_MODELS", "glm"),
     CompatProvider("grok", "Grok API (xAI)", "XAI_API_KEY", "XAI_BASE_URL",
@@ -270,29 +405,122 @@ def _post_json(url: str, headers: dict, payload: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def generate_openai_compat(base: str, api_key: str, model: str, prompt: str) -> tuple[str, float, int]:
+def _retry_after_s(exc: urllib.error.HTTPError, attempt: int) -> float:
+    """Seconds to wait before the next attempt: the server's Retry-After
+    (delta-seconds or HTTP-date) when present, else exponential backoff with a
+    little jitter — capped at RETRY_AFTER_CAP_S either way."""
+    header = (exc.headers.get("Retry-After") if exc.headers else None) or ""
+    header = header.strip()
+    wait = None
+    if header:
+        try:
+            wait = float(header)
+        except ValueError:
+            try:
+                when = email.utils.parsedate_to_datetime(header)
+                wait = (when - dt.datetime.now(when.tzinfo)).total_seconds()
+            except (TypeError, ValueError):
+                wait = None
+    if wait is None:
+        wait = BACKOFF_BASE_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+    return max(0.0, min(wait, RETRY_AFTER_CAP_S))
+
+
+def _post_json_with_retry(url: str, headers: dict, payload: dict,
+                          attempts: int = MAX_ATTEMPTS) -> tuple[dict, float, int]:
+    """POST with a bounded retry on transient statuses (RETRY_STATUSES): at
+    most `attempts` calls, honouring Retry-After. Returns (body, latency_s of
+    the successful call only — waits are not charged to the model, attempts
+    used). Any other error, or the last transient one, propagates."""
+    for attempt in range(1, attempts + 1):
+        start = time.time()
+        try:
+            body = _post_json(url, headers, payload)
+            return body, time.time() - start, attempt
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRY_STATUSES or attempt == attempts:
+                raise
+            _sleep(_retry_after_s(exc, attempt))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def generate_openai_compat(base: str, api_key: str, model: str, prompt: str,
+                           thinking_params: dict | None = None, max_tokens: int | None = None,
+                           meta: dict | None = None) -> tuple[str, float, int]:
     """One chat-completions call on an OpenAI-compatible API (Qwen, Gemini,
     GLM/Zhipu, Grok — any provider in COMPAT_PROVIDERS). Thinking is switched
-    off like the Ollama path, so a thinking model does not spend max_tokens on
-    hidden reasoning; a provider that rejects the switch (HTTP 400) is retried
-    once without it. Returns (text, latency_s, completion_tokens) — the same
-    per-call latency/token numbers every provider's bench row records."""
+    off (or minimised) with the provider's own documented parameter — the
+    default is Qwen's `enable_thinking: false`; a provider that rejects it
+    (HTTP 400) is retried once without it. Transient 429/503-class errors get
+    the bounded retry in _post_json_with_retry. Returns (text,
+    latency_s, completion_tokens) — the same per-call latency/token numbers
+    every provider's bench row records. Only the final message content is
+    scored; any inline reasoning block is stripped."""
+    if thinking_params is None:
+        thinking_params = {"enable_thinking": False}
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
-    payload = {"model": model, "max_tokens": MAX_TOKENS,
-               "messages": [{"role": "user", "content": prompt}],
-               "enable_thinking": False}
-    start = time.time()
+    payload = {"model": model, "max_tokens": max_tokens or MAX_TOKENS,
+               "messages": [{"role": "user", "content": prompt}]}
+    payload.update(thinking_params)
+    url = base + "/chat/completions"
     try:
-        body = _post_json(base + "/chat/completions", headers, payload)
+        body, latency, attempts = _post_json_with_retry(url, headers, payload)
     except urllib.error.HTTPError as exc:
-        if exc.code != 400:
+        if exc.code != 400 or not thinking_params:
             raise
-        payload.pop("enable_thinking")
-        body = _post_json(base + "/chat/completions", headers, payload)
-    latency = time.time() - start
+        for key in thinking_params:
+            payload.pop(key, None)
+        body, latency, attempts = _post_json_with_retry(url, headers, payload)
     choices = body.get("choices") or [{}]
-    text = ((choices[0].get("message") or {}).get("content") or "").strip()
+    text = strip_reasoning((choices[0].get("message") or {}).get("content") or "")
+    truncated = choices[0].get("finish_reason") == "length"
+    if meta is not None:
+        meta.update({"truncated": truncated, "attempts": attempts})
+    if not text and truncated:
+        raise BenchCallError("budget", f"no answer within {payload['max_tokens']} tokens "
+                                       "(reasoning used the budget)")
     return text, latency, int((body.get("usage") or {}).get("completion_tokens") or 0)
+
+
+def classify_error(exc: Exception, workspace_set: bool | None = None) -> tuple[str, str]:
+    """(kind, message) for a probe call that raised. Every kind is recorded
+    as an inconclusive `error` row — "could not reach / could not ask" — and
+    never as a model FAIL. Kinds: auth (incl. the workspace-scope 400),
+    rate_limited (429), unavailable (5xx), gone (404/410: model retired or
+    renamed), timeout, network, budget, http_<code>, error."""
+    if isinstance(exc, BenchCallError):
+        return exc.kind, str(exc)
+    text = str(exc)
+    status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if WORKSPACE_ERROR_MARKER in text:
+        if workspace_set is None:
+            workspace_set = bool(os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip())
+        if workspace_set:
+            return "auth", ("key not scoped to a workspace and the anthropic-workspace-id "
+                            "header sent from ANTHROPIC_WORKSPACE_ID was not accepted; "
+                            "check the id or use a workspace-scoped key")
+        return "auth", WORKSPACE_HINT
+    if isinstance(status, int):
+        if status in (401, 403):
+            return "auth", f"HTTP {status}: authentication/permission refused ({text[:120]})"
+        if status == 429:
+            return "rate_limited", f"HTTP 429: rate limited after {MAX_ATTEMPTS} attempts"
+        if status in (404, 410):
+            return "gone", f"HTTP {status}: model not served (retired or renamed?)"
+        if status >= 500:
+            return "unavailable", f"HTTP {status}: provider unavailable after {MAX_ATTEMPTS} attempts"
+        return f"http_{status}", text[:200]
+    if isinstance(exc, (TimeoutError,)) or "timed out" in text.lower():
+        return "timeout", text[:200]
+    if isinstance(exc, (urllib.error.URLError, ConnectionError, OSError)):
+        return "network", text[:200]
+    return "error", text[:200]
+
+
+# An error of one of these kinds will repeat identically on every remaining
+# probe for that model, so the rest are recorded with the same reason instead
+# of spending more calls on it.
+FATAL_ERROR_KINDS = {"auth", "gone"}
 
 
 def discover_openai_compat(base: str, api_key: str, label: str = "provider") -> list:
@@ -305,8 +533,31 @@ def discover_openai_compat(base: str, api_key: str, label: str = "provider") -> 
             body = json.loads(r.read().decode("utf-8"))
         return [m.get("id") for m in body.get("data", []) if m.get("id")]
     except Exception as exc:  # noqa: BLE001 - discovery is optional, never fatal
-        print(f"{label} discover: /models failed ({exc})", flush=True)
+        print(f"{label} discover: /models failed ({safe_error_text(exc)})", flush=True)
         return []
+
+
+def safe_error_text(exc: Exception) -> str:
+    """An exception summary that can never carry a URL: the HTTP status for
+    an HTTPError, else the exception class name. (Some urllib errors embed
+    the request URL, and a provider's base URL must never be published.)"""
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return f"HTTP {code}"
+    return type(exc).__name__
+
+
+def redact(text: str, private: list) -> str:
+    """Replace every private string (full base URLs and their hosts) in text."""
+    import urllib.parse
+    for value in private:
+        if not value:
+            continue
+        host = urllib.parse.urlsplit(value).netloc
+        for needle in (value, host):
+            if needle:
+                text = text.replace(needle, "<redacted>")
+    return text
 
 
 def discover_models(base: str, api_key: str) -> list:
@@ -325,6 +576,129 @@ def discover_models(base: str, api_key: str) -> list:
     except Exception as exc:  # noqa: BLE001 - discovery is optional, never fatal
         print(f"discover: /api/tags failed ({exc}); using the static model list", flush=True)
         return []
+
+
+def error_row(kind: str, message: str) -> dict:
+    """An inconclusive probe: the model was not reached or not asked, so there
+    is no answer to score. `pass` is None — neither a pass nor a FAIL — so a
+    clean-sweep check (all probes pass) can never count it as capability, and
+    the scoreboard keeps "could not reach" apart from "answered wrong"."""
+    return {"pass": None, "status": "error", "error_kind": kind, "error": message[:200]}
+
+
+def is_error(probe: dict) -> bool:
+    return probe.get("status") == "error" or ("error" in probe and "latency_s" not in probe)
+
+
+def cell_status(probe: dict) -> str:
+    if is_error(probe):
+        return "ERR"
+    return "PASS" if probe.get("pass") else "FAIL"
+
+
+def row_counts(row: dict) -> tuple[int, int, int]:
+    """(passes, fails, errors) over a row's probes."""
+    passes = fails = errors = 0
+    for name in probes():
+        r = row.get(name)
+        if not isinstance(r, dict):
+            continue
+        if is_error(r):
+            errors += 1
+        elif r.get("pass"):
+            passes += 1
+        else:
+            fails += 1
+    return passes, fails, errors
+
+
+def row_verdict(row: dict) -> str:
+    """clean sweep | fail | inconclusive. A row with any FAIL is `fail` (a
+    real wrong answer is evidence even beside an unreachable probe); a row with
+    no FAIL but at least one error is `inconclusive` — never a pass, never a
+    permanent disqualification (the next run decides)."""
+    passes, fails, errors = row_counts(row)
+    if fails:
+        return "fail"
+    if errors or passes < len(probes()):
+        return "inconclusive"
+    return "clean sweep"
+
+
+def merge_rows(prior: dict, fresh: dict, same_harness: bool = True) -> dict:
+    """Same-day rerun merge: fresh rows win per model, except that a fresh
+    inconclusive (error) probe never overwrites a conclusive result for the
+    same model and probe from earlier the same day — an outage on the rerun
+    must not erase evidence already gathered today. That carry-over only
+    applies when the earlier run used the same harness (same_harness): a
+    score produced by an older, since-fixed call path is not evidence."""
+    merged = dict(prior)
+    for model, row in fresh.items():
+        old = prior.get(model)
+        if not isinstance(old, dict) or not same_harness:
+            merged[model] = row
+            continue
+        combined = dict(row)
+        for name in probes():
+            new_probe, old_probe = row.get(name), old.get(name)
+            if (isinstance(new_probe, dict) and is_error(new_probe)
+                    and isinstance(old_probe, dict) and not is_error(old_probe)):
+                combined[name] = old_probe
+        merged[model] = combined
+    return merged
+
+
+def render_markdown(results: dict) -> str:
+    provider_label = {provider.key: provider.label for provider in COMPAT_PROVIDERS}
+    names = list(probes())
+    lines = [f"# Model bench — {results['date']}", "",
+             f"Base: `{results['base']}` · max_tokens={MAX_TOKENS} "
+             f"(+{THINK_HEADROOM} headroom only where thinking cannot be switched off)", "",
+             "PASS/FAIL = the model answered and was scored. **ERR = could not reach or "
+             "could not ask** (rate limit, outage, auth, retired model, token budget) — "
+             "inconclusive: never counted as a pass, never as a FAIL.", "",
+             # avg latency + total tokens sit next to the probe scores so a
+             # provider's speed and volume can be weighed against its pass
+             # rate — capability, not price (no $/Mtok table lives here; see README).
+             "| model | " + " | ".join(names) + " | score | verdict | avg latency | total tokens |",
+             "|---|" + "---|" * (len(names) + 4)]
+    notes: list = []
+    for model, row in results["models"].items():
+        cells, lats, toks = [], [], []
+        errors_seen: dict = {}
+        for name in names:
+            r = row.get(name)
+            if r is None:  # merged older row from before a probe existed
+                cells.append("—")
+                continue
+            if is_error(r):
+                kind = r.get("error_kind") or "error"
+                cells.append(f"ERR ({kind})")
+                errors_seen.setdefault(r.get("error", kind), []).append(name)
+                continue
+            cells.append(("PASS" if r.get("pass") else "FAIL") + f" {r['latency_s']}s"
+                         + (" (trunc)" if r.get("truncated") else ""))
+            lats.append(r["latency_s"])
+            if "tokens" in r:
+                toks.append(r["tokens"])
+        passes, fails, errors = row_counts(row)
+        score = f"{passes}/{len(names)}" + (f" · {errors} err" if errors else "")
+        avg = f"{sum(lats) / len(lats):.1f}s" if lats else "-"
+        total_tokens = str(sum(toks)) if toks else "-"
+        label = f"**{model}** (baseline)" if row.get("baseline") else model
+        if row.get("provider") in provider_label:
+            label = f"{model} ({provider_label[row['provider']]})"
+        lines.append(f"| {label} | " + " | ".join(cells)
+                     + f" | {score} | {row_verdict(row)} | {avg} | {total_tokens} |")
+        for message, probe_names in errors_seen.items():
+            notes.append(f"- `{model}` ERR on {', '.join(probe_names)}: {message}")
+        if row.get("think"):
+            notes.append(f"- `{model}` cannot switch thinking off; benched at think=`{row['think']}`, "
+                         "answer scored without the reasoning trace (not allocatable to the "
+                         "bridge tier, which calls think:false).")
+    if notes:
+        lines += ["", "## Notes", ""] + notes
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
@@ -368,10 +742,16 @@ def main() -> int:
         base_url = (os.getenv(provider.base_env, "").strip() or provider.default_base).rstrip("/")
         compat_key[provider.key] = key
         compat_base[provider.key] = base_url
+        base_missing = provider.base_required and not base_url
+        base_note = (f"{provider.base_env} unset — {provider.label} skipped (its endpoint "
+                     "comes only from that secret; no fallback to a generic endpoint)")
 
         if getattr(args, f"{provider.flag}_list"):
             if not key:
                 print(f"{provider.key_env} unset", flush=True)
+                return 1
+            if base_missing:
+                print(base_note, flush=True)
                 return 1
             print("\n".join(discover_openai_compat(base_url, key, label=provider.key)))
             return 0
@@ -379,6 +759,9 @@ def main() -> int:
         provider_models = [m.strip() for m in getattr(args, f"{provider.flag}_models").split(",") if m.strip()]
         if provider_models and not key:
             print(f"note: {provider.key_env} unset — {provider.label} models skipped", flush=True)
+            provider_models = []
+        elif provider_models and base_missing:
+            print(f"note: {base_note}", flush=True)
             provider_models = []
         compat_models_by_provider[provider.key] = provider_models
         for model in provider_models:
@@ -400,34 +783,62 @@ def main() -> int:
     today = dt.date.today().isoformat()
     all_compat_models = [m for provider in COMPAT_PROVIDERS for m in compat_models_by_provider[provider.key]]
 
-    results: dict = {"date": today, "base": base, "models": {}}
+    if baselines and not os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip():
+        print("note: ANTHROPIC_WORKSPACE_ID unset — fine for a workspace-scoped key; "
+              "a key that is not workspace-scoped will show as an auth error row", flush=True)
+    provider_by_key = {provider.key: provider for provider in COMPAT_PROVIDERS}
+
+    results: dict = {"date": today, "base": base, "harness": HARNESS_VERSION, "models": {}}
     for model in models + baselines + all_compat_models:
         is_baseline = model in baselines
         provider_key = None if is_baseline else model_provider.get(model)
         row: dict = {"baseline": is_baseline} if is_baseline else {}
         if provider_key:
             row["provider"] = provider_key
+        fatal: tuple | None = None
         for name, (prompt, check) in probes().items():
-            try:
-                if is_baseline:
-                    text, latency, tokens = generate_anthropic(model, prompt)
-                elif provider_key:
-                    text, latency, tokens = generate_openai_compat(
-                        compat_base[provider_key], compat_key[provider_key], model, prompt)
-                else:
-                    text, latency, tokens = generate(base, api_key, model, prompt)
-                # latency_s and tokens are recorded for every model on every
-                # probe (all providers, including the ones added here) so
-                # capability, speed and volume can be weighed together once a
-                # provider's $/Mtok pricing is confirmed — see the README note
-                # on why no price table lives in this script.
-                row[name] = {"pass": bool(check(text)), "latency_s": round(latency, 1),
-                             "tokens": tokens, "reply_head": text[:120]}
-            except Exception as exc:  # noqa: BLE001 - a dead model must not kill the bench
-                row[name] = {"pass": False, "error": str(exc)[:200]}
-            print(f"{model:24s} {name:14s} "
-                  f"{'PASS' if row[name].get('pass') else 'FAIL':4s} "
-                  f"{row[name].get('latency_s', '-')}s", flush=True)
+            meta: dict = {}
+            if fatal:
+                # Same reason would repeat on every remaining probe (auth,
+                # retired model) — record it, don't spend more calls.
+                row[name] = error_row(*fatal)
+            else:
+                try:
+                    if is_baseline:
+                        text, latency, tokens = generate_anthropic(model, prompt)
+                    elif provider_key:
+                        provider = provider_by_key[provider_key]
+                        text, latency, tokens = generate_openai_compat(
+                            compat_base[provider_key], compat_key[provider_key], model, prompt,
+                            thinking_params=dict(provider.thinking_params),
+                            max_tokens=MAX_TOKENS + provider.thinking_headroom, meta=meta)
+                    else:
+                        text, latency, tokens = generate(base, api_key, model, prompt, meta=meta)
+                    # latency_s and tokens are recorded for every model on every
+                    # probe (all providers, including the ones added here) so
+                    # capability, speed and volume can be weighed together once a
+                    # provider's $/Mtok pricing is confirmed — see the README note
+                    # on why no price table lives in this script.
+                    passed = bool(check(text))
+                    row[name] = {"pass": passed, "status": "pass" if passed else "fail",
+                                 "latency_s": round(latency, 1), "tokens": tokens,
+                                 "reply_head": text[:120]}
+                    if meta.get("truncated"):
+                        row[name]["truncated"] = True
+                    if meta.get("attempts", 1) > 1:
+                        row[name]["attempts"] = meta["attempts"]
+                except Exception as exc:  # noqa: BLE001 - a dead model must not kill the bench
+                    kind, message = classify_error(exc)
+                    # Error text goes into a committed (public) report: strip
+                    # any provider base URL / host that an exception carried.
+                    message = redact(message, list(compat_base.values()))
+                    row[name] = error_row(kind, message)
+                    if kind in FATAL_ERROR_KINDS:
+                        fatal = (kind, message)
+            if meta.get("think"):
+                row["think"] = meta["think"]
+            print(f"{model:24s} {name:14s} {cell_status(row[name]):4s} "
+                  f"{row[name].get('latency_s', row[name].get('error_kind', '-'))}", flush=True)
         results["models"][model] = row
 
     out_dir = pathlib.Path(args.out_dir)
@@ -438,39 +849,12 @@ def main() -> int:
     if json_path.exists():
         try:
             prior = json.loads(json_path.read_text(encoding="utf-8"))
-            merged = prior.get("models", {})
-            merged.update(results["models"])
-            results["models"] = merged
+            results["models"] = merge_rows(prior.get("models", {}), results["models"],
+                                           same_harness=prior.get("harness") == HARNESS_VERSION)
         except (ValueError, OSError):
             pass  # unreadable prior report: overwrite it
     json_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-
-    provider_label = {provider.key: provider.label for provider in COMPAT_PROVIDERS}
-    lines = [f"# Model bench — {today}", "", f"Base: `{base}` · max_tokens={MAX_TOKENS}", "",
-             # avg latency + total tokens sit next to the probe scores so a
-             # provider's speed and volume can be weighed against its pass
-             # rate — capability, not price (no $/Mtok table lives here; see README).
-             "| model | " + " | ".join(probes()) + " | avg latency | total tokens |",
-             "|---|" + "---|" * (len(probes()) + 2)]
-    for model, row in results["models"].items():
-        cells, lats, toks = [], [], []
-        for name in probes():
-            r = row.get(name)
-            if r is None:  # merged older row from before a probe existed
-                cells.append("—")
-                continue
-            cells.append(("PASS" if r.get("pass") else "FAIL") + (f" {r['latency_s']}s" if "latency_s" in r else " (err)"))
-            if "latency_s" in r:
-                lats.append(r["latency_s"])
-            if "tokens" in r:
-                toks.append(r["tokens"])
-        avg = f"{sum(lats) / len(lats):.1f}s" if lats else "-"
-        total_tokens = str(sum(toks)) if toks else "-"
-        label = f"**{model}** (baseline)" if row.get("baseline") else model
-        if row.get("provider") in provider_label:
-            label = f"{model} ({provider_label[row['provider']]})"
-        lines.append(f"| {label} | " + " | ".join(cells) + f" | {avg} | {total_tokens} |")
-    (out_dir / f"{today}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out_dir / f"{today}.md").write_text(render_markdown(results), encoding="utf-8")
     print(f"\nReport: {out_dir / (today + '.md')}")
     return 0
 

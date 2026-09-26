@@ -468,6 +468,16 @@ def anthropic_ready() -> bool:
     )
 
 
+def _anthropic_client_kwargs() -> dict:
+    """Optional `anthropic-workspace-id` header. An API key that is not scoped
+    to a workspace gets `400 invalid_request_error ... must include the
+    anthropic-workspace-id header` on every call (seen on the 2026-09-26
+    bench); ANTHROPIC_WORKSPACE_ID supplies it. Unset = no header, exactly as
+    before — a workspace-scoped key needs nothing."""
+    workspace = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+    return {"default_headers": {"anthropic-workspace-id": workspace}} if workspace else {}
+
+
 def _client():
     global _CLIENT
     if anthropic is None:
@@ -475,7 +485,7 @@ def _client():
             "the 'anthropic' package is not installed — run: pip install anthropic"
         )
     if _CLIENT is None:
-        _CLIENT = anthropic.Anthropic()
+        _CLIENT = anthropic.Anthropic(**_anthropic_client_kwargs())
     return _CLIENT
 
 
@@ -1111,6 +1121,14 @@ BENCH_REPORTS_DIR = pathlib.Path(__file__).parent / "bench" / "reports"
 CRITICAL_PROBES = {"price-honesty", "tier-math"}
 
 
+def _probe_inconclusive(probe: dict) -> bool:
+    """A bench probe that errored rather than being scored (the bench writes
+    status "error" / pass None; older reports wrote pass False + an error
+    string with no latency)."""
+    return (probe.get("status") == "error" or probe.get("pass") is None
+            or ("error" in probe and "latency_s" not in probe))
+
+
 def bench_allocation() -> Optional[dict]:
     """Auto-allocation from the latest committed bench report: among bridge
     models with a clean sweep (all probes PASS, critical probes present),
@@ -1124,7 +1142,10 @@ def bench_allocation() -> Optional[dict]:
     if os.getenv("CLAUDE_ROUTER_AUTO_ALLOCATE", "1").strip().lower() in {"0", "false", "off"}:
         return None
     try:
-        latest = max(BENCH_REPORTS_DIR.glob("*.json"))
+        # Dated weekly reports only (YYYY-MM-DD.json). frontier_bench writes
+        # frontier-YYYY-MM-DD.json to the same folder, and "f" sorts after
+        # every digit — a bare *.json max() would read the wrong report.
+        latest = max(BENCH_REPORTS_DIR.glob("[0-9]*.json"))
     except (ValueError, OSError):
         return None
     try:
@@ -1136,10 +1157,26 @@ def bench_allocation() -> Optional[dict]:
     for model, row in (report.get("models") or {}).items():
         if not isinstance(row, dict) or row.get("baseline"):
             continue  # Claude baseline rows are comparison points, not allocatable
+        if row.get("provider"):
+            # Hosted-API rows (Qwen/Gemini/GLM/Grok via their own endpoints)
+            # are not Ollama tags — allocating one would point the bridge at
+            # a model it cannot serve.
+            continue
+        if row.get("think"):
+            # Benched at a thinking LEVEL because the model cannot switch
+            # thinking off; the bridge calls think:false, under which such a
+            # model leaks its reasoning into the reply. Not the same mode.
+            continue
         probes = {k: v for k, v in row.items() if isinstance(v, dict) and "pass" in v}
         if not probes or not CRITICAL_PROBES.issubset(probes):
             continue
-        if not all(v.get("pass") for v in probes.values()):
+        if any(_probe_inconclusive(v) for v in probes.values()):
+            # Could not reach / could not ask (429, 503, auth, budget): no
+            # evidence either way. Never a pass — and not a strike either: the
+            # allocation only ever reads the latest report, so the next run
+            # decides afresh.
+            continue
+        if not all(v.get("pass") is True for v in probes.values()):
             continue
         lats = [v["latency_s"] for v in probes.values() if "latency_s" in v]
         avg = sum(lats) / len(lats) if lats else float("inf")
