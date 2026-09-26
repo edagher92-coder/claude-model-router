@@ -12,8 +12,13 @@ lineup across two engines (Anthropic API + the Ollama bridge):
 - Claude Fable 5 as the frontier reserve tier.
 
 Engines and how they resolve (the v5.1 setup contract):
-- Anthropic engine: needs `pip install anthropic` + ANTHROPIC_API_KEY (or
-  ANTHROPIC_AUTH_TOKEN). Without them the router still works in OFFLINE
+- Anthropic engine, subscription-first (subscription_auth.py): on a local,
+  interactive machine a signed-in Claude Code CLI wins and the router shells
+  out to `claude -p` (Anthropic's terms keep subscription OAuth inside Claude
+  Code, so the token is never lifted into a raw API call). Otherwise it needs
+  `pip install anthropic` + ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN). CI
+  (the CI env var) and ROUTER_AUTH=key always use the key — set ROUTER_AUTH=key
+  on any server. Without any Claude auth the router still works in OFFLINE
   mode — everything routes to the Ollama bridge, Claude tiers are skipped
   in escalation, and stakes=True refuses (stakes never runs on the bridge).
 - Ollama bridge: tried as a chain, first reachable base wins —
@@ -30,7 +35,7 @@ Usage:
     reply = run("Refactor this function", tier="sonnet", effort="high")
 
 CLI:
-    python router.py --doctor           # setup check: engines, bases, tags
+    python router.py doctor             # setup check: engines, auth per provider, bases, tags
     python router.py --registry         # active registry as JSON
     python router.py "task..." [--tier glm] [--stakes] [--effort high]
 
@@ -59,6 +64,12 @@ try:  # the Anthropic engine is optional in OFFLINE (Ollama-only) mode
     import anthropic
 except ImportError:  # pragma: no cover - exercised on machines without the SDK
     anthropic = None  # type: ignore[assignment]
+
+import subscription_auth
+
+# `except ()` catches nothing, so these clauses stay valid when the SDK is absent
+# and the subscription path (no SDK needed) is the one raising.
+_API_STATUS_ERRORS: tuple = (anthropic.APIStatusError,) if anthropic is not None else ()
 
 _CLIENT = None
 
@@ -458,14 +469,13 @@ def _maybe_compact(task: str, effective_stakes: bool, target_tier: str,
 # Engine availability
 # --------------------------------------------------------------------------- #
 def anthropic_ready() -> bool:
-    """True when the Anthropic engine can actually take a request: SDK
-    installed and an auth env var set. Does not validate the key (no spend)."""
-    if anthropic is None:
-        return False
-    return bool(
-        os.getenv("ANTHROPIC_API_KEY", "").strip()
-        or os.getenv("ANTHROPIC_AUTH_TOKEN", "").strip()
-    )
+    """True when the Anthropic engine can actually take a request: a signed-in
+    Claude Code CLI (subscription), or SDK installed and an auth env var set.
+    Does not validate the key (no spend)."""
+    mode = subscription_auth.resolve_claude_auth()
+    if mode == subscription_auth.SUBSCRIPTION:
+        return True
+    return mode == subscription_auth.KEY and anthropic is not None
 
 
 def _client():
@@ -485,6 +495,10 @@ def _create_message(request: dict):
     on an SDK or API that doesn't accept it, retry once WITHOUT it rather than
     hard-failing the whole dispatch. Effort is an optimisation, not a
     requirement; every other error propagates untouched."""
+    if subscription_auth.resolve_claude_auth() == subscription_auth.SUBSCRIPTION:
+        response = _subscription_message(request)
+        if response is not None:
+            return response
     try:
         return _client().messages.create(**request)
     except TypeError as exc:
@@ -492,12 +506,32 @@ def _create_message(request: dict):
             request.pop("output_config", None)
             return _client().messages.create(**request)
         raise
-    except anthropic.APIStatusError as exc:
+    except _API_STATUS_ERRORS as exc:
         if ("output_config" in request and getattr(exc, "status_code", None) == 400
                 and "output_config" in str(getattr(exc, "message", "") or exc).lower()):
             request.pop("output_config", None)
             return _client().messages.create(**request)
         raise
+
+
+def _subscription_message(request: dict):
+    """Subscription path: one `claude -p` turn, tools off, shaped like an SDK
+    Message. On failure, fall back to the API key only if one is usable and
+    ROUTER_AUTH is not pinned to subscription; otherwise raise."""
+    messages = request.get("messages") or [{}]
+    try:
+        return subscription_auth.as_message(subscription_auth.claude_print(
+            str(messages[-1].get("content", "")), str(request["model"]),
+            system=request.get("system"),
+            effort=(request.get("output_config") or {}).get("effort"),
+        ))
+    except subscription_auth.ClaudeCLIError as exc:
+        if (anthropic is None or not subscription_auth.has_claude_key()
+                or subscription_auth.auth_override() == "subscription"):
+            raise RouterSetupError(f"subscription dispatch failed and no API-key fallback: {exc}") from exc
+        print(f"[router] claude -p failed ({exc}) — falling back to the API key",
+              file=sys.stderr, flush=True)
+        return None
 
 
 def _ollama_bases() -> list[tuple[str, str]]:
@@ -743,7 +777,7 @@ def run(
                 request["output_config"] = {"effort": requested_effort}
             try:
                 response = _create_message(request)
-            except anthropic.APIStatusError as exc:
+            except _API_STATUS_ERRORS as exc:
                 # Fable can be unavailable or permission-restricted on some accounts.
                 # Fall back one tier for access/availability errors, but re-raise all other errors.
                 if getattr(exc, "status_code", None) in {400, 401, 403, 404} and current_tier == "fable":
@@ -756,7 +790,7 @@ def run(
             output_tokens = getattr(response.usage, "output_tokens", 0)
             text = _response_text(response)
             stop_reason = getattr(response, "stop_reason", None)
-            via = _via_label(None, model_id)
+            via = getattr(response, "via", None) or _via_label(None, model_id)
 
         last_text = text
 
@@ -820,7 +854,17 @@ def doctor() -> dict:
         "detail": "set (validity not checked — doctor makes no API calls)" if key_ok else "unset",
         "fix": "" if key_ok else "export ANTHROPIC_API_KEY=sk-... (or ANTHROPIC_AUTH_TOKEN)",
     })
-    claude_ready = sdk_ok and key_ok
+    auth_rows = subscription_auth.provider_auth()
+    for auth in auth_rows:
+        rows.append({"check": f"auth: {auth['provider']}", "ok": True,
+                     "detail": f"{auth['auth']} — {auth['detail']}", "fix": ""})
+    claude_auth = auth_rows[0]["auth"]
+    claude_ready = claude_auth == subscription_auth.SUBSCRIPTION or (sdk_ok and key_ok)
+    if claude_auth == subscription_auth.SUBSCRIPTION:
+        for row in rows[:2]:  # SDK + key are only the fallback while the login works
+            if not row["ok"]:
+                row.update(ok=True, fix="", detail=f"{row['detail']} (fallback only — subscription "
+                           "login in use; CI and servers still need the key)")
 
     bridge_base: Optional[str] = None
     bridge_key = ""
@@ -901,6 +945,18 @@ def doctor() -> dict:
         "fix": "" if log_dir_ok else "set CLAUDE_ROUTER_LOG to a writable path",
     })
 
+    local_bases = [b for b, _k in _ollama_bases() if b != "https://ollama.com"]
+    if bridge_base and bridge_base != "https://ollama.com":
+        ollama_auth = ("subscription", f"daemon at {bridge_base} (`ollama signin` there covers :cloud tags)")
+    elif bridge_base:
+        ollama_auth = ("key", "OLLAMA_API_KEY against ollama.com")
+    else:
+        ollama_auth = ("none", "no reachable daemon" + (f" ({', '.join(local_bases)})" if local_bases
+                                                          else "") + " and no OLLAMA_API_KEY")
+    rows.append({"check": "auth: Ollama Cloud", "ok": True,
+                 "detail": f"{ollama_auth[0]} — {ollama_auth[1]}", "fix": ""})
+    auth_rows.append({"provider": "Ollama Cloud", "auth": ollama_auth[0], "detail": ollama_auth[1]})
+
     if claude_ready and bridge_ready:
         mode = "full ladder (Claude tiers + Ollama bridge)"
     elif claude_ready:
@@ -912,6 +968,8 @@ def doctor() -> dict:
 
     return {
         "rows": rows,
+        "auth": auth_rows,
+        "claude_auth": claude_auth,
         "claude_ready": claude_ready,
         "bridge_ready": bridge_ready,
         "bridge_base": bridge_base,
@@ -1076,12 +1134,13 @@ def _classify(task: str) -> str:
     # looks_like_stakes() still scans the FULL text in run(), so the NUMBERS RULE
     # backstop is untouched by this truncation.
     probe = task if len(task) <= 5000 else task[:4000] + "\n...\n" + task[-1000:]
-    response = _client().messages.create(
-        model=_model_id("haiku"),
-        max_tokens=5,
-        messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(task=probe)}],
-    )
-    word = _response_text(response).strip().upper()
+    response = _create_message({
+        "model": _model_id("haiku"),
+        "max_tokens": 5,
+        "messages": [{"role": "user", "content": CLASSIFIER_PROMPT.format(task=probe)}],
+    })
+    # First word only: the subscription path (`claude -p`) has no max_tokens cap.
+    word = (re.findall(r"[A-Z]+", _response_text(response).upper()) or [""])[0]
     return {
         "HAIKU": "haiku",
         "SONNET": "sonnet",
@@ -1250,7 +1309,8 @@ def _print_doctor_report(report: dict) -> None:
         print(line)
         if row["fix"]:
             print(f"         fix: {row['fix']}")
-    print(f"\n  Claude tiers : {'READY' if report['claude_ready'] else 'OFFLINE'}")
+    print(f"\n  Claude tiers : {'READY' if report['claude_ready'] else 'OFFLINE'}"
+          f" (auth: {report.get('claude_auth', '?')})")
     print(f"  Ollama bridge: {'READY via ' + str(report['bridge_base']) if report['bridge_ready'] else 'OFFLINE'}")
     print(f"  Router mode  : {report['mode']}")
 
@@ -1277,6 +1337,8 @@ if __name__ == "__main__":
     parser.add_argument("--compact-threshold", type=int, metavar="TOK",
                         help="input est-token threshold above which non-stakes input is compacted (default 8000)")
     args = parser.parse_args()
+    if args.task == ["doctor"]:  # `python router.py doctor` == `--doctor`
+        args.task, args.doctor = [], True
 
     # CLI flags set the same env knobs the library reads, so behaviour is
     # identical whether the router is driven from the shell or imported.
