@@ -26,7 +26,7 @@ def _env(name, default=""):
 
 def _redact(text):
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "QWEN_API_KEY", "OLLAMA_API_KEY",
-                 "XAI_API_KEY", "QWEN_BASE_URL", "GEMINI_BASE_URL", "XAI_BASE_URL", "ANTHROPIC_WORKSPACE_ID"):
+                 "XAI_API_KEY", "AI_GATEWAY_API_KEY", "QWEN_BASE_URL", "GEMINI_BASE_URL", "XAI_BASE_URL", "ANTHROPIC_WORKSPACE_ID"):
         secret = _env(name)
         if secret:
             text = text.replace(secret, "[redacted]")
@@ -56,7 +56,7 @@ def _call_once(url, headers, body=None):
         return 0, {"error": _redact(f"{type(err).__name__}: {err}")[:300]}
 
 
-def _openai_compat(base, key, model, extra_headers=None, token_field="max_tokens"):
+def _openai_compat(base, key, model, extra_headers=None, token_field="max_tokens", prefer=""):
     headers = {"authorization": f"Bearer {key}", **(extra_headers or {})}
     status, body = _call(f"{base.rstrip('/')}/models", headers)
     if status != 200:
@@ -69,7 +69,8 @@ def _openai_compat(base, key, model, extra_headers=None, token_field="max_tokens
         chat_ids = [i for i in ids if "embed" not in i and "image" not in i and "tts" not in i]
         if not chat_ids:
             return False, f"{count} models listed; none usable for a reply check"
-        model = chat_ids[0]
+        preferred = [i for i in chat_ids if prefer and prefer in i]
+        model = (preferred or chat_ids)[0]
     status, body = _call(f"{base.rstrip('/')}/chat/completions", headers,
                          {"model": model, token_field: 16,
                           "messages": [{"role": "user", "content": "Reply with the word ok."}]})
@@ -155,9 +156,19 @@ def check_grok():
     return _openai_compat(_env("XAI_BASE_URL", "https://api.x.ai/v1"), key, _env("XAI_CHECK_MODEL"))
 
 
+def check_vercel_gateway():
+    key = _env("AI_GATEWAY_API_KEY")
+    if not key:
+        return None
+    # Documented at vercel.com/docs/ai-gateway/sdks-and-apis/openai-chat-completions.
+    # The reply check prefers the cheapest Claude id the gateway itself lists.
+    return _openai_compat("https://ai-gateway.vercel.sh/v1", key, _env("AI_GATEWAY_CHECK_MODEL"),
+                          prefer="claude-haiku")
+
+
 CHECKS = [("Anthropic", check_anthropic), ("OpenAI", check_openai), ("Gemini", check_gemini),
           ("Qwen", check_qwen), ("Ollama Cloud", check_ollama),
-          ("Grok (xAI)", check_grok)]
+          ("Grok (xAI)", check_grok), ("Vercel AI Gateway", check_vercel_gateway)]
 
 SUBSCRIPTION_TOKENS = [("Claude subscription (CLAUDE_CODE_OAUTH_TOKEN)", "CLAUDE_CODE_OAUTH_TOKEN")]
 
