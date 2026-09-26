@@ -26,7 +26,7 @@ def _env(name, default=""):
 
 def _redact(text):
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "QWEN_API_KEY", "OLLAMA_API_KEY",
-                 "XAI_API_KEY"):
+                 "XAI_API_KEY", "QWEN_BASE_URL", "GEMINI_BASE_URL", "XAI_BASE_URL", "ANTHROPIC_WORKSPACE_ID"):
         secret = _env(name)
         if secret:
             text = text.replace(secret, "[redacted]")
