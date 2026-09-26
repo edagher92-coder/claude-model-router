@@ -19,7 +19,8 @@ TIMEOUT = 30
 
 
 def _env(name, default=""):
-    return os.getenv(name, default).strip()
+    # CI passes an unset secret as an empty string, so empty means "use the default".
+    return os.getenv(name, "").strip() or default
 
 
 def _redact(text):
