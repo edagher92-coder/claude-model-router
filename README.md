@@ -82,6 +82,28 @@ Behaviour by environment (each engine degrades honestly, never silently):
 | missing | ready | **OFFLINE**: non-stakes work routes to the bridge, Claude tiers are skipped in escalation, and any **stakes** task (explicit `stakes=True` **or** a customer money/legal keyword in the text) refuses rather than run on the bridge (NUMBERS RULE) |
 | missing | down | `RouterSetupError` pointing at `--doctor` |
 
+## Subscription-first auth (local, interactive machines only)
+
+On a laptop where the Claude Code CLI is signed in (`claude auth login`), the
+Claude tiers run through `claude -p` (tools off, prompt on stdin, API-key
+variables hidden from the child) and bill the Claude subscription. The API key
+is the fallback. Anthropic's terms keep subscription OAuth inside Claude Code,
+so the router never lifts the login token into a raw API call.
+
+| Situation | Claude auth used |
+|---|---|
+| `CI` set (GitHub Actions) | API key, always |
+| `ROUTER_AUTH=key` (set this on every server) | API key |
+| Claude Code CLI signed in | subscription via `claude -p`; a failed run falls back to the key |
+| `ROUTER_AUTH=subscription` | subscription only, no key fallback |
+| otherwise | `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`, else offline |
+
+`python router.py doctor` prints one `auth:` row per provider (Claude, OpenAI,
+xAI Grok, Gemini, Qwen, Ollama Cloud): subscription login, API key, or none.
+The checks are local status commands and credential-file presence only. They
+make no model call and print no secret. `setup-windows.ps1` walks through the
+vendor logins; `-SkipLogins` skips that step.
+
 ## What changed in v5.1
 
 - GLM 5.2 (`glm` tier) between Sonnet and Opus via the Ollama bridge, with the
@@ -192,6 +214,7 @@ candidate providers was left out rather than guessed; add verified
 ## Files
 
 - `router.py` — classifier, registry, dispatch, fallback, doctor, and usage log.
+- `subscription_auth.py` — subscription-first Claude auth (`claude -p`), the `ROUTER_AUTH`/`CI` rules, and the doctor's per-provider auth rows.
 - `hq_orchestrator/` — MCP server for the tri-agent handoff protocol (see below),
   including two-tier delegation (`orchestrate_task`: Opus sub-manager returns child
   envelopes, executed cheapest-first, depth-capped).

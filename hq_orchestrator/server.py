@@ -1,7 +1,10 @@
 """hq-orchestrator MCP server — FastMCP wiring over core.delegate.
 
 Run:  python -m hq_orchestrator.server
-Env:  ANTHROPIC_API_KEY   (required for real delegation)
+Env:  ANTHROPIC_API_KEY   (fallback: a signed-in Claude Code CLI is used first
+                         on a local machine, via `claude -p`; see subscription_auth.py)
+      ROUTER_AUTH         (key = always the API key; set it wherever this runs
+                         as a shared server. CI always uses the key.)
       HQ_RUNS_DIR         (default .orchestrator/runs-base)
       HQ_CARDS_DIR        (path to .github/orchestration/system-cards)
       HQ_SKILLS_DIRS      (os.pathsep-separated; promoted dir first)
@@ -18,6 +21,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+
+import subscription_auth
 
 from . import core, ollama_caller
 
@@ -37,7 +42,32 @@ RETRY_DELAYS = (2, 4, 8, 16)
 MAX_OUTPUT_TOKENS = 32_000
 
 
+def _subscription_caller(model: str, system: str, message: str, submit_tool: dict) -> dict | None:
+    """Subscription path: `claude -p` with --json-schema set to the submit tool's
+    schema, so the worker's structured output is the same dict the forced tool
+    call would carry. Returns None to fall back to the API key when allowed."""
+    try:
+        data = subscription_auth.claude_print(message, model, system=system,
+                                              json_schema=submit_tool["input_schema"])
+        structured = data.get("structured_output")
+        if not isinstance(structured, dict):
+            raise subscription_auth.ClaudeCLIError("no structured_output in the claude -p result")
+    except subscription_auth.ClaudeCLIError:
+        if subscription_auth.has_claude_key() and subscription_auth.auth_override() != "subscription":
+            return None
+        raise
+    usage = data.get("usage") or {}
+    result = dict(structured)
+    result["usage_note"] = (f"input_tokens={usage.get('input_tokens', 0)} "
+                            f"output_tokens={usage.get('output_tokens', 0)} via=claude -p (subscription)")
+    return result
+
+
 def _anthropic_caller(model: str, system: str, message: str, submit_tool: dict) -> dict:
+    if subscription_auth.resolve_claude_auth() == subscription_auth.SUBSCRIPTION:
+        result = _subscription_caller(model, system, message, submit_tool)
+        if result is not None:
+            return result
     last_error: Exception | None = None
     for attempt, delay in enumerate((0,) + RETRY_DELAYS):
         if delay:
