@@ -30,7 +30,7 @@ except ImportError as exc:  # pragma: no cover - import guard
     ) from exc
 
 mcp = FastMCP("hq-orchestrator")
-_client = anthropic.Anthropic()
+_client = anthropic.Anthropic(**core.anthropic_client_kwargs())
 _store = core.RunStore(os.getenv("HQ_RUNS_DIR", ".orchestrator/runs-base"))
 
 RETRY_DELAYS = (2, 4, 8, 16)
