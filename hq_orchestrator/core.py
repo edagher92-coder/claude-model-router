@@ -81,6 +81,17 @@ def sign_payload(body: bytes, secret: str) -> str:
     return "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
 
+def anthropic_client_kwargs() -> dict:
+    """Extra kwargs for anthropic.Anthropic(...). A key that is not scoped to
+    a workspace must send the `anthropic-workspace-id` header on every request
+    or the API answers 400 invalid_request_error; ANTHROPIC_WORKSPACE_ID
+    supplies it. Optional — unset means no header (a workspace-scoped key
+    needs none). Kept here (stdlib-only) so it is testable without the SDK;
+    mirrors router._anthropic_client_kwargs."""
+    workspace = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+    return {"default_headers": {"anthropic-workspace-id": workspace}} if workspace else {}
+
+
 ENVELOPE_VERSION = "1.0"
 TASK_ID_RE = re.compile(r"^T[0-9]{3}$")
 
