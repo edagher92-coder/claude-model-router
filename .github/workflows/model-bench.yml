@@ -24,16 +24,42 @@ jobs:
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
           QWEN_BASE_URL: ${{ vars.QWEN_BASE_URL }}
           QWEN_BENCH_MODELS: ${{ vars.QWEN_BENCH_MODELS }}
+          # Optional: Google Gemini rows, same pattern (key = secret, base
+          # override + model list = repo variables; unset = skipped). Get the
+          # exact model id from `--gemini-list` once GEMINI_API_KEY exists —
+          # never hand-type a guessed id into GEMINI_BENCH_MODELS.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL }}
+          GEMINI_BENCH_MODELS: ${{ vars.GEMINI_BENCH_MODELS }}
+          # Optional: GLM (Zhipu / Z.ai) rows, same pattern.
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
+          GLM_BASE_URL: ${{ vars.GLM_BASE_URL }}
+          GLM_BENCH_MODELS: ${{ vars.GLM_BENCH_MODELS }}
+          # Optional: xAI Grok rows, same pattern (env vars are XAI_*; the
+          # CLI flags and report label say "grok").
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          XAI_BASE_URL: ${{ vars.XAI_BASE_URL }}
+          XAI_BENCH_MODELS: ${{ vars.XAI_BENCH_MODELS }}
         run: |
           pip install anthropic --quiet || true
-          if [ -z "$OLLAMA_API_KEY" ]; then
-            echo "OLLAMA_API_KEY not set - nothing to do. Add the secret to enable the weekly bench."
+          if [ -z "$OLLAMA_API_KEY" ] && [ -z "$QWEN_API_KEY" ] && [ -z "$GEMINI_API_KEY" ] \
+             && [ -z "$GLM_API_KEY" ] && [ -z "$XAI_API_KEY" ]; then
+            echo "No provider keys set - nothing to do. Add OLLAMA_API_KEY and/or QWEN_API_KEY/GEMINI_API_KEY/GLM_API_KEY/XAI_API_KEY to enable the weekly bench."
             exit 0
           fi
-          # --discover auto-includes any NEW cloud model the bridge lists, so a
-          # release like Kimi K3 Max is benched the first run after it lands,
-          # with no code change. Runs on GitHub's servers -> works with the PC off.
-          python3 bench/model_bench.py --discover
+          if [ -n "$OLLAMA_API_KEY" ]; then
+            # --discover auto-includes any NEW cloud model the bridge lists, so a
+            # release like Kimi K3 Max is benched the first run after it lands,
+            # with no code change. Runs on GitHub's servers -> works with the PC off.
+            python3 bench/model_bench.py --discover
+          else
+            # No Ollama fleet to bench this run — skip its (large) default
+            # model list rather than let every one of them fail against an
+            # unreachable localhost daemon, and bench only whichever of
+            # Qwen/Gemini/GLM/Grok/Claude-baseline actually has a key set.
+            echo "OLLAMA_API_KEY not set - benching only the configured hosted providers."
+            python3 bench/model_bench.py --models ""
+          fi
       - name: Commit report
         run: |
           if [ -n "$(git status --porcelain bench/reports)" ]; then

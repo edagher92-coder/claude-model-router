@@ -1,17 +1,42 @@
 """Weekly Ollama model bench for router v5.1 delegation tuning.
 
 Probes each candidate model on the task families the router actually delegates
-(mechanical extract, bulk summarise, code, short reasoning) plus a
-price-honesty probe (does the model invent a Snow Flow price, or say UNKNOWN?)
-— the deciding factor for what non-stakes work it may touch.
+(mechanical extract, bulk summarise, code, short reasoning) plus the
+business-critical probes — price-honesty (does the model invent a Snow Flow
+price, or say UNKNOWN?), tier-math (the round-UP-to-the-next-add-on rule) and
+deep-reason (the classic 5-machines/100-machines pattern-matching trap) — the
+deciding factor for what non-stakes work a model may touch, and for whether a
+new client-facing provider gets offered at all.
 
 Zero deps (stdlib). Usage:
     OLLAMA_API_KEY=...  python bench/model_bench.py                # default shortlist
     python bench/model_bench.py --models glm-5.2,gpt-oss:120b      # explicit
     python bench/model_bench.py --base http://localhost:11434      # your daemon
 
-Writes bench/reports/<date>.md + .json. Run weekly (or via the
-model-bench.yml workflow once OLLAMA_API_KEY is a repo secret).
+Candidate hosted providers reuse the same OpenAI-compatible adapter
+(`generate_openai_compat` / `discover_openai_compat`) via their own
+API-key/base-URL/model-list env vars — unset means that provider is skipped
+cleanly (a printed note, never a failed run):
+
+    | Provider          | key env         | base env         | models env         | CLI flags                     |
+    |-------------------|-----------------|------------------|--------------------|--------------------------------|
+    | Qwen (Alibaba)    | QWEN_API_KEY    | QWEN_BASE_URL    | QWEN_BENCH_MODELS  | --qwen-models / --qwen-list    |
+    | Google Gemini     | GEMINI_API_KEY  | GEMINI_BASE_URL  | GEMINI_BENCH_MODELS| --gemini-models / --gemini-list|
+    | GLM (Zhipu/Z.ai)  | GLM_API_KEY     | GLM_BASE_URL     | GLM_BENCH_MODELS   | --glm-models / --glm-list      |
+    | Grok (xAI)        | XAI_API_KEY     | XAI_BASE_URL     | XAI_BENCH_MODELS   | --grok-models / --grok-list    |
+
+No model id is ever hardcoded for these — `*_BENCH_MODELS` (or the matching
+CLI flag) is the only source, or `--<provider>-list` to print what the
+provider's own /models endpoint currently offers. The default base URLs for
+Gemini, GLM and Grok are unverified starting points (see the `# [CONFIRM]`
+comments below) — confirm the exact path/domain for the account in use
+before relying on them for anything beyond this bench.
+
+Writes bench/reports/<date>.md + .json, including per-probe latency_s and
+tokens for every model (all providers) so cost-per-run can be computed once
+verified $/Mtok pricing exists for a provider — this script does not carry a
+price table itself (see README). Run weekly (or via the model-bench.yml
+workflow once the relevant secrets/vars are set).
 """
 from __future__ import annotations
 
@@ -23,6 +48,7 @@ import pathlib
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 HERE = pathlib.Path(__file__).parent
 # The live Ollama Cloud fleet as of 2026-07-24 (verified by that day's bench
@@ -190,9 +216,52 @@ def generate(base: str, api_key: str, model: str, prompt: str) -> tuple[str, flo
     return (body.get("response") or "").strip(), latency, int(body.get("eval_count") or 0)
 
 
-# Qwen (Alibaba Model Studio) through its OpenAI-compatible endpoint. The key
-# and model names come from env/flags only — no model name is guessed here.
+# Hosted providers benched through the OpenAI-compatible adapter below. Every
+# key, base URL override and model list comes from env/CLI only — no model id
+# is ever guessed here. Qwen's base is the one endpoint actually verified live
+# (see the Sep-2026 Qwen bench); the other three are plausible starting points
+# that have NOT been confirmed against the account in use, so they carry an
+# explicit [CONFIRM] — a wrong path/domain fails loudly (that provider's rows
+# error out) rather than silently, but it should still be checked before the
+# provider is offered to a client.
 QWEN_DEFAULT_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# Google's documented OpenAI-compatibility endpoint for the Gemini API.
+GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"  # [CONFIRM]
+# Zhipu's mainland OpenAI-compatible v4 endpoint. The international Z.ai
+# brand may instead need something like https://api.z.ai/api/paas/v4 for this
+# account's key — confirm which domain the account is actually provisioned
+# on before relying on this default.
+GLM_DEFAULT_BASE = "https://open.bigmodel.cn/api/paas/v4"  # [CONFIRM]
+# xAI's OpenAI-compatible endpoint.
+XAI_DEFAULT_BASE = "https://api.x.ai/v1"  # [CONFIRM]
+
+
+@dataclass(frozen=True)
+class CompatProvider:
+    """One hosted, OpenAI-compatible bench provider: the env/CLI names that
+    control it, and the label used in results and the printed report. Adding
+    a new provider is one entry here — `main()` and the report loop below are
+    written against this list, not against any one provider's name."""
+
+    key: str            # internal id stored in results["models"][model]["provider"]
+    label: str          # shown in the markdown report, e.g. "Qwen API"
+    key_env: str        # required API key env var
+    base_env: str       # optional base-URL override env var
+    default_base: str   # fallback base URL (see the [CONFIRM] constants above)
+    models_env: str     # env var holding a comma list of model ids to bench
+    flag: str           # CLI flag prefix -> --<flag>-models / --<flag>-list
+
+
+COMPAT_PROVIDERS: list[CompatProvider] = [
+    CompatProvider("qwen", "Qwen API", "QWEN_API_KEY", "QWEN_BASE_URL",
+                    QWEN_DEFAULT_BASE, "QWEN_BENCH_MODELS", "qwen"),
+    CompatProvider("gemini", "Gemini API", "GEMINI_API_KEY", "GEMINI_BASE_URL",
+                    GEMINI_DEFAULT_BASE, "GEMINI_BENCH_MODELS", "gemini"),
+    CompatProvider("glm", "GLM API (Zhipu/Z.ai)", "GLM_API_KEY", "GLM_BASE_URL",
+                    GLM_DEFAULT_BASE, "GLM_BENCH_MODELS", "glm"),
+    CompatProvider("grok", "Grok API (xAI)", "XAI_API_KEY", "XAI_BASE_URL",
+                    XAI_DEFAULT_BASE, "XAI_BENCH_MODELS", "grok"),
+]
 
 
 def _post_json(url: str, headers: dict, payload: dict) -> dict:
@@ -202,10 +271,12 @@ def _post_json(url: str, headers: dict, payload: dict) -> dict:
 
 
 def generate_openai_compat(base: str, api_key: str, model: str, prompt: str) -> tuple[str, float, int]:
-    """One chat-completions call on an OpenAI-compatible API (Qwen today).
-    Thinking is switched off like the Ollama path, so a thinking model does
-    not spend max_tokens on hidden reasoning; a provider that rejects the
-    switch (HTTP 400) is retried once without it."""
+    """One chat-completions call on an OpenAI-compatible API (Qwen, Gemini,
+    GLM/Zhipu, Grok — any provider in COMPAT_PROVIDERS). Thinking is switched
+    off like the Ollama path, so a thinking model does not spend max_tokens on
+    hidden reasoning; a provider that rejects the switch (HTTP 400) is retried
+    once without it. Returns (text, latency_s, completion_tokens) — the same
+    per-call latency/token numbers every provider's bench row records."""
     headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
     payload = {"model": model, "max_tokens": MAX_TOKENS,
                "messages": [{"role": "user", "content": prompt}],
@@ -224,15 +295,17 @@ def generate_openai_compat(base: str, api_key: str, model: str, prompt: str) -> 
     return text, latency, int((body.get("usage") or {}).get("completion_tokens") or 0)
 
 
-def discover_openai_compat(base: str, api_key: str) -> list:
-    """Model ids an OpenAI-compatible API lists at /models. Best-effort."""
+def discover_openai_compat(base: str, api_key: str, label: str = "provider") -> list:
+    """Model ids an OpenAI-compatible API lists at /models. Best-effort — this
+    is the ONLY source of model ids for a provider's `--<flag>-list`, so a
+    provider with a real /models endpoint never needs a guessed id in code."""
     try:
         req = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + api_key})
         with urllib.request.urlopen(req, timeout=30) as r:
             body = json.loads(r.read().decode("utf-8"))
         return [m.get("id") for m in body.get("data", []) if m.get("id")]
     except Exception as exc:  # noqa: BLE001 - discovery is optional, never fatal
-        print(f"qwen discover: /models failed ({exc})", flush=True)
+        print(f"{label} discover: /models failed ({exc})", flush=True)
         return []
 
 
@@ -266,25 +339,50 @@ def main() -> int:
                         help="also bench every model the bridge lists in /api/tags "
                              "(auto-picks up NEW cloud models like Kimi K3 Max the day "
                              "they land — no tag guessing, runs PC-off in CI)")
-    parser.add_argument("--qwen-models", default=os.getenv("QWEN_BENCH_MODELS", ""),
-                        help="comma list of Qwen model ids to bench via the OpenAI-compatible "
-                             "API (needs QWEN_API_KEY); empty skips Qwen")
-    parser.add_argument("--qwen-list", action="store_true",
-                        help="print the model ids the Qwen API lists, then exit")
+    for provider in COMPAT_PROVIDERS:
+        models_help = (f"comma list of {provider.label} model ids to bench via the "
+                        f"OpenAI-compatible adapter (needs {provider.key_env}); empty skips it")
+        if provider.key == "gemini":
+            # Elie's first Gemini candidate (2026-09-26) is "Gemini 3.8
+            # Flash", but its exact API model id is UNCONFIRMED — get it from
+            # --gemini-list once GEMINI_API_KEY exists; never guess it here.
+            models_help += " ([CONFIRM: exact Gemini 3.8 Flash model ID] via --gemini-list)"
+        parser.add_argument(f"--{provider.flag}-models", default=os.getenv(provider.models_env, ""),
+                            help=models_help)
+        parser.add_argument(
+            f"--{provider.flag}-list", action="store_true",
+            help=f"print the model ids the {provider.label} /models endpoint lists, then exit",
+        )
     args = parser.parse_args()
 
-    qwen_key = os.getenv("QWEN_API_KEY", "").strip()
-    qwen_base = (os.getenv("QWEN_BASE_URL", "").strip() or QWEN_DEFAULT_BASE).rstrip("/")
-    if args.qwen_list:
-        if not qwen_key:
-            print("QWEN_API_KEY unset", flush=True)
-            return 1
-        print("\n".join(discover_openai_compat(qwen_base, qwen_key)))
-        return 0
-    qwen_models = [m.strip() for m in args.qwen_models.split(",") if m.strip()]
-    if qwen_models and not qwen_key:
-        print("note: QWEN_API_KEY unset — Qwen models skipped", flush=True)
-        qwen_models = []
+    # Resolve each hosted provider's key/base once, and its bench model list
+    # (env or --<flag>-models) — a provider without a key is skipped cleanly
+    # (a printed reason, never an exception that kills the whole bench). Keys
+    # are read into local variables only and never printed.
+    compat_key: dict[str, str] = {}
+    compat_base: dict[str, str] = {}
+    model_provider: dict[str, str] = {}  # model id -> provider key, for dispatch below
+    compat_models_by_provider: dict[str, list] = {}
+    for provider in COMPAT_PROVIDERS:
+        key = os.getenv(provider.key_env, "").strip()
+        base_url = (os.getenv(provider.base_env, "").strip() or provider.default_base).rstrip("/")
+        compat_key[provider.key] = key
+        compat_base[provider.key] = base_url
+
+        if getattr(args, f"{provider.flag}_list"):
+            if not key:
+                print(f"{provider.key_env} unset", flush=True)
+                return 1
+            print("\n".join(discover_openai_compat(base_url, key, label=provider.key)))
+            return 0
+
+        provider_models = [m.strip() for m in getattr(args, f"{provider.flag}_models").split(",") if m.strip()]
+        if provider_models and not key:
+            print(f"note: {provider.key_env} unset — {provider.label} models skipped", flush=True)
+            provider_models = []
+        compat_models_by_provider[provider.key] = provider_models
+        for model in provider_models:
+            model_provider[model] = provider.key
 
     api_key = os.getenv("OLLAMA_API_KEY", "").strip()
     base = (args.base or ("https://ollama.com" if api_key else "http://localhost:11434")).rstrip("/")
@@ -300,22 +398,29 @@ def main() -> int:
         print("note: ANTHROPIC_API_KEY unset — Claude baselines skipped", flush=True)
         baselines = []
     today = dt.date.today().isoformat()
+    all_compat_models = [m for provider in COMPAT_PROVIDERS for m in compat_models_by_provider[provider.key]]
 
     results: dict = {"date": today, "base": base, "models": {}}
-    for model in models + baselines + qwen_models:
+    for model in models + baselines + all_compat_models:
         is_baseline = model in baselines
-        is_qwen = model in qwen_models
+        provider_key = None if is_baseline else model_provider.get(model)
         row: dict = {"baseline": is_baseline} if is_baseline else {}
-        if is_qwen:
-            row["provider"] = "qwen"
+        if provider_key:
+            row["provider"] = provider_key
         for name, (prompt, check) in probes().items():
             try:
                 if is_baseline:
                     text, latency, tokens = generate_anthropic(model, prompt)
-                elif is_qwen:
-                    text, latency, tokens = generate_openai_compat(qwen_base, qwen_key, model, prompt)
+                elif provider_key:
+                    text, latency, tokens = generate_openai_compat(
+                        compat_base[provider_key], compat_key[provider_key], model, prompt)
                 else:
                     text, latency, tokens = generate(base, api_key, model, prompt)
+                # latency_s and tokens are recorded for every model on every
+                # probe (all providers, including the ones added here) so
+                # capability, speed and volume can be weighed together once a
+                # provider's $/Mtok pricing is confirmed — see the README note
+                # on why no price table lives in this script.
                 row[name] = {"pass": bool(check(text)), "latency_s": round(latency, 1),
                              "tokens": tokens, "reply_head": text[:120]}
             except Exception as exc:  # noqa: BLE001 - a dead model must not kill the bench
@@ -340,10 +445,15 @@ def main() -> int:
             pass  # unreadable prior report: overwrite it
     json_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
+    provider_label = {provider.key: provider.label for provider in COMPAT_PROVIDERS}
     lines = [f"# Model bench — {today}", "", f"Base: `{base}` · max_tokens={MAX_TOKENS}", "",
-             "| model | " + " | ".join(probes()) + " | avg latency |", "|---|" + "---|" * (len(probes()) + 1)]
+             # avg latency + total tokens sit next to the probe scores so a
+             # provider's speed and volume can be weighed against its pass
+             # rate — capability, not price (no $/Mtok table lives here; see README).
+             "| model | " + " | ".join(probes()) + " | avg latency | total tokens |",
+             "|---|" + "---|" * (len(probes()) + 2)]
     for model, row in results["models"].items():
-        cells, lats = [], []
+        cells, lats, toks = [], [], []
         for name in probes():
             r = row.get(name)
             if r is None:  # merged older row from before a probe existed
@@ -352,11 +462,14 @@ def main() -> int:
             cells.append(("PASS" if r.get("pass") else "FAIL") + (f" {r['latency_s']}s" if "latency_s" in r else " (err)"))
             if "latency_s" in r:
                 lats.append(r["latency_s"])
+            if "tokens" in r:
+                toks.append(r["tokens"])
         avg = f"{sum(lats) / len(lats):.1f}s" if lats else "-"
+        total_tokens = str(sum(toks)) if toks else "-"
         label = f"**{model}** (baseline)" if row.get("baseline") else model
-        if row.get("provider") == "qwen":
-            label = f"{model} (Qwen API)"
-        lines.append(f"| {label} | " + " | ".join(cells) + f" | {avg} |")
+        if row.get("provider") in provider_label:
+            label = f"{model} ({provider_label[row['provider']]})"
+        lines.append(f"| {label} | " + " | ".join(cells) + f" | {avg} | {total_tokens} |")
     (out_dir / f"{today}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"\nReport: {out_dir / (today + '.md')}")
     return 0

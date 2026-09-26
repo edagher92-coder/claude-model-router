@@ -132,6 +132,58 @@ export CLAUDE_ROUTER_OPUS_EFFORT=xhigh
 export CLAUDE_ROUTER_FABLE_EFFORT=high
 ```
 
+## Benching a hosted provider (Qwen / Gemini / GLM / Grok)
+
+Before any of these is offered to a client, it runs the exact same probe set
+as the rest of the fleet (`bench/model_bench.py`) — including the
+business-critical **price-honesty**, **tier-math** and **deep-reason** probes.
+Each provider is reused through the same OpenAI-compatible adapter and is
+controlled purely by env vars / CLI flags — no model id or endpoint is ever
+hardcoded, and a provider with no key is skipped cleanly (a printed note,
+never a failed run):
+
+| Provider | API key | Base URL override | Bench model list | CLI flags |
+|---|---|---|---|---|
+| Qwen (Alibaba) | `QWEN_API_KEY` | `QWEN_BASE_URL` | `QWEN_BENCH_MODELS` | `--qwen-models`, `--qwen-list` |
+| Google Gemini | `GEMINI_API_KEY` | `GEMINI_BASE_URL` | `GEMINI_BENCH_MODELS` | `--gemini-models`, `--gemini-list` |
+| GLM (Zhipu / Z.ai) | `GLM_API_KEY` | `GLM_BASE_URL` | `GLM_BENCH_MODELS` | `--glm-models`, `--glm-list` |
+| Grok (xAI) | `XAI_API_KEY` | `XAI_BASE_URL` | `XAI_BENCH_MODELS` | `--grok-models`, `--grok-list` |
+
+> `GLM (Zhipu/Z.ai)` here is a **different thing** from the router's own
+> `glm` tier in the model registry above (GLM 5.2 via the Ollama bridge). The
+> bench provider is Zhipu/Z.ai's own hosted API — a separate candidate, not
+> the same GLM.
+
+```bash
+# Find the real model id first — never guess one:
+GEMINI_API_KEY=... python bench/model_bench.py --gemini-list
+
+# Then bench it on the full probe set:
+GEMINI_API_KEY=... GEMINI_BENCH_MODELS=<id from --gemini-list> \
+  python bench/model_bench.py --models ""
+```
+
+`--<provider>-list` calls that provider's own `/models` endpoint — the only
+source of a real id — and refuses cleanly (exit 1, no call made) if the key
+is missing. `[CONFIRM]`: the default base URLs for Gemini, GLM and Grok in
+`bench/model_bench.py` (`GEMINI_DEFAULT_BASE`, `GLM_DEFAULT_BASE`,
+`XAI_DEFAULT_BASE`) are plausible starting points, not verified endpoints —
+confirm the exact domain/path for the account in use (`*_BASE_URL` overrides
+the default without a code change). Elie's first Gemini candidate is
+"Gemini 3.8 Flash"; its exact API model id is `[CONFIRM: exact Gemini 3.8
+Flash model ID]` — get it from `--gemini-list` once `GEMINI_API_KEY` exists,
+rather than typing a guessed id into `GEMINI_BENCH_MODELS`.
+
+Every bench row (any provider) records `latency_s` and `tokens` per probe
+next to the pass/fail score — and the markdown report totals tokens per
+model — so capability, speed and volume can all be weighed together.
+**No `$`/Mtok price table lives in `bench/model_bench.py`** (unlike
+`bench/frontier_bench.py`'s `PRICES` dict, which is scoped to the Anthropic
+and OpenAI entrants it benches, and `router.py`'s `MODEL_REGISTRY`, which
+prices the router's own fixed internal tiers) — pricing for these four
+candidate providers was left out rather than guessed; add verified
+`input_usd_per_mtok`/`output_usd_per_mtok` once confirmed.
+
 ## Files
 
 - `router.py` — classifier, registry, dispatch, fallback, doctor, and usage log.
@@ -140,8 +192,11 @@ export CLAUDE_ROUTER_FABLE_EFFORT=high
   envelopes, executed cheapest-first, depth-capped).
 - `ORCHESTRATION.md` — the Fable-leads / Opus-manages / fleet-executes policy.
 - `bench/model_bench.py` — weekly Ollama fleet bench (extract / summarise / code /
-  reasoning / price-honesty); dated reports in `bench/reports/`; `model-bench.yml`
-  runs it Mondays once the `OLLAMA_API_KEY` secret is set.
+  reasoning / price-honesty / tier-math / deep-reason); dated reports in
+  `bench/reports/`; `model-bench.yml` runs it Mondays once the `OLLAMA_API_KEY`
+  secret is set. Also benches hosted candidate providers — Qwen, Google
+  Gemini, GLM (Zhipu/Z.ai) and xAI Grok — on the identical probes via a
+  shared OpenAI-compatible adapter; see "Benching a hosted provider" below.
 - `tests/` — offline test suite (no network, no keys): `python -m pytest tests/`.
 - `MODEL-ROUTING-POLICY.md` — quality-first routing policy for Claude Code / cowork sessions.
 - `router-usage.csv` — generated locally at runtime; do not commit sensitive logs.
