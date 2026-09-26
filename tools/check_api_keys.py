@@ -12,6 +12,7 @@ configured key works. An unset key is reported, not failed.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -33,6 +34,16 @@ def _redact(text):
 
 
 def _call(url, headers, body=None):
+    """One request, retried up to 3 times when the provider says it is busy (429/503)."""
+    for attempt in range(3):
+        status, payload = _call_once(url, headers, body)
+        if status not in (429, 503) or attempt == 2:
+            return status, payload
+        time.sleep(2 * (attempt + 1))
+    return status, payload
+
+
+def _call_once(url, headers, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, headers={**headers, "content-type": "application/json"},
                                  method="POST" if data else "GET")
@@ -45,7 +56,7 @@ def _call(url, headers, body=None):
         return 0, {"error": _redact(f"{type(err).__name__}: {err}")[:300]}
 
 
-def _openai_compat(base, key, model, extra_headers=None):
+def _openai_compat(base, key, model, extra_headers=None, token_field="max_tokens"):
     headers = {"authorization": f"Bearer {key}", **(extra_headers or {})}
     status, body = _call(f"{base.rstrip('/')}/models", headers)
     if status != 200:
@@ -60,8 +71,11 @@ def _openai_compat(base, key, model, extra_headers=None):
             return False, f"{count} models listed; none usable for a reply check"
         model = chat_ids[0]
     status, body = _call(f"{base.rstrip('/')}/chat/completions", headers,
-                         {"model": model, "max_tokens": 16,
+                         {"model": model, token_field: 16,
                           "messages": [{"role": "user", "content": "Reply with the word ok."}]})
+    if status in (429, 503):
+        # The key authenticated (the model list worked); the model itself is busy.
+        return True, f"{count} models listed; key valid, but {model} was busy (HTTP {status}) after 3 tries"
     if status != 200:
         return False, f"{count} models listed; reply from {model} HTTP {status}: {body.get('error', '')}"
     return True, f"{count} models listed; {model} replied"
@@ -94,7 +108,7 @@ def check_openai():
     if not key:
         return None
     return _openai_compat(_env("OPENAI_BASE_URL", "https://api.openai.com/v1"), key,
-                          _env("OPENAI_CHECK_MODEL", "gpt-5.6-sol"))
+                          _env("OPENAI_CHECK_MODEL", "gpt-5.6-sol"), token_field="max_completion_tokens")
 
 
 def check_gemini():
